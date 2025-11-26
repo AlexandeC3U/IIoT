@@ -208,6 +208,8 @@ Before submitting a PR, ensure:
 
 ### Running Tests
 
+**Frontend & Gateway (TypeScript):**
+
 ```bash
 # Run all tests
 pnpm test
@@ -224,6 +226,30 @@ pnpm test:coverage
 
 # Run E2E tests
 pnpm test:e2e
+```
+
+**Go Services:**
+
+```bash
+# Run all Go tests
+cd services/protocol-gateway
+go test ./...
+
+# Run with verbose output
+go test -v ./...
+
+# Run with coverage
+go test -cover ./...
+
+# Run with race detection
+go test -race ./...
+
+# Generate coverage report
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+
+# Run benchmarks
+go test -bench=. ./...
 ```
 
 ### Test Structure
@@ -252,7 +278,66 @@ tests/
 
 ### Writing Tests
 
-**Unit Tests (Vitest):**
+**Go Unit Tests:**
+
+```go
+package s7_test
+
+import (
+    "testing"
+    
+    "github.com/nexus-edge/protocol-gateway/internal/protocols/s7"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+)
+
+func TestParseS7Address(t *testing.T) {
+    tests := []struct {
+        name     string
+        address  string
+        expected *s7.Address
+        wantErr  bool
+    }{
+        {
+            name:    "valid DB REAL address",
+            address: "DB1.DBD0",
+            expected: &s7.Address{
+                Area:     s7.AreaDB,
+                DBNumber: 1,
+                Type:     s7.TypeDBD,
+                Offset:   0,
+                DataType: s7.DataTypeREAL,
+            },
+            wantErr: false,
+        },
+        {
+            name:    "invalid address",
+            address: "INVALID",
+            wantErr: true,
+        },
+    }
+    
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            result, err := s7.ParseAddress(tt.address)
+            if tt.wantErr {
+                require.Error(t, err)
+                return
+            }
+            require.NoError(t, err)
+            assert.Equal(t, tt.expected, result)
+        })
+    }
+}
+
+func BenchmarkParseS7Address(b *testing.B) {
+    for i := 0; i < b.N; i++ {
+        s7.ParseAddress("DB1.DBD0")
+    }
+}
+```
+
+**TypeScript Unit Tests (Vitest):**
 
 ```typescript
 import { describe, it, expect, vi } from 'vitest';
@@ -373,7 +458,128 @@ Add screenshots for UI changes.
 
 ## Style Guides
 
-### TypeScript
+### Go (Backend Services)
+
+We use `gofmt`, `golint`, and `staticcheck` for consistent code style:
+
+```bash
+# Format code
+go fmt ./...
+
+# Run linter
+golangci-lint run
+
+# Run static analysis
+staticcheck ./...
+```
+
+**Key Conventions:**
+
+```go
+// Package comments should be descriptive
+// Package s7 implements the Siemens S7 protocol client.
+package s7
+
+// Use descriptive error variables
+var (
+    ErrConnectionFailed = errors.New("s7: connection failed")
+    ErrInvalidAddress   = errors.New("s7: invalid address format")
+)
+
+// Prefer returning errors over panicking
+func (c *Client) ReadTag(address string) (interface{}, error) {
+    parsed, err := ParseAddress(address)
+    if err != nil {
+        return nil, fmt.Errorf("parsing address: %w", err)
+    }
+    // ...
+    return value, nil
+}
+
+// Use context for cancellation and timeouts
+func (c *Client) Connect(ctx context.Context) error {
+    ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    // ...
+}
+
+// Use table-driven tests
+func TestParseAddress(t *testing.T) {
+    tests := []struct {
+        name    string
+        input   string
+        want    *Address
+        wantErr bool
+    }{
+        // test cases...
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            // ...
+        })
+    }
+}
+
+// Interfaces should be small and focused
+type Reader interface {
+    Read(address string) (interface{}, error)
+}
+
+type Writer interface {
+    Write(address string, value interface{}) error
+}
+
+// Prefer composition over large interfaces
+type ReadWriter interface {
+    Reader
+    Writer
+}
+
+// Use channels for concurrent communication
+type Publisher struct {
+    messages chan Message
+    done     chan struct{}
+}
+
+func (p *Publisher) Start(ctx context.Context) {
+    go func() {
+        for {
+            select {
+            case msg := <-p.messages:
+                p.publish(msg)
+            case <-ctx.Done():
+                close(p.done)
+                return
+            }
+        }
+    }()
+}
+```
+
+**Project Structure for Go Services:**
+
+```
+services/protocol-gateway/
+├── cmd/
+│   └── gateway/
+│       └── main.go           # Entry point
+├── internal/                  # Private packages
+│   ├── protocols/
+│   │   ├── s7/
+│   │   ├── opcua/
+│   │   └── modbus/
+│   ├── core/
+│   └── config/
+├── pkg/                       # Public packages (if any)
+├── go.mod
+├── go.sum
+├── Dockerfile
+└── Makefile
+```
+
+---
+
+### TypeScript (API Gateway & Frontend)
 
 We use ESLint and Prettier for consistent code style:
 

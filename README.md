@@ -129,53 +129,59 @@ nexus-edge/
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
-│   ├── 📂 protocol-gateway/              # Industrial protocol conversion
-│   │   ├── src/
+│   ├── 📂 protocol-gateway/              # Industrial protocol conversion (Go)
+│   │   ├── cmd/
+│   │   │   └── gateway/
+│   │   │       └── main.go               # Application entrypoint
+│   │   ├── internal/
 │   │   │   ├── protocols/
-│   │   │   │   ├── s7/                   # Siemens S7 driver (Snap7)
-│   │   │   │   │   ├── S7Client.ts
-│   │   │   │   │   ├── S7DataTypes.ts
-│   │   │   │   │   └── S7Poller.ts
-│   │   │   │   ├── opcua/                # OPC UA client (node-opcua)
-│   │   │   │   │   ├── OPCUAClient.ts
-│   │   │   │   │   ├── OPCUABrowser.ts   # Tag discovery
-│   │   │   │   │   └── OPCUASubscription.ts
-│   │   │   │   ├── modbus/               # Modbus TCP/RTU (modbus-serial)
-│   │   │   │   │   ├── ModbusClient.ts
-│   │   │   │   │   ├── ModbusPoller.ts
-│   │   │   │   │   └── ModbusTypes.ts
+│   │   │   │   ├── s7/                   # Siemens S7 driver (gos7)
+│   │   │   │   │   ├── client.go
+│   │   │   │   │   ├── types.go
+│   │   │   │   │   └── poller.go
+│   │   │   │   ├── opcua/                # OPC UA client (gopcua)
+│   │   │   │   │   ├── client.go
+│   │   │   │   │   ├── browser.go        # Tag discovery
+│   │   │   │   │   └── subscription.go
+│   │   │   │   ├── modbus/               # Modbus TCP/RTU (go-modbus)
+│   │   │   │   │   ├── client.go
+│   │   │   │   │   ├── poller.go
+│   │   │   │   │   └── types.go
 │   │   │   │   └── mqtt/                 # Native MQTT passthrough
-│   │   │   │       └── MQTTBridge.ts
+│   │   │   │       └── bridge.go
 │   │   │   ├── core/
-│   │   │   │   ├── DeviceManager.ts      # Device lifecycle
-│   │   │   │   ├── TagRegistry.ts        # Unified tag namespace
-│   │   │   │   ├── DataNormalizer.ts     # Value scaling, units
-│   │   │   │   └── MQTTPublisher.ts      # Publish to EMQX
-│   │   │   ├── discovery/
-│   │   │   │   ├── NetworkScanner.ts     # Subnet scanning
-│   │   │   │   ├── OPCUADiscovery.ts     # OPC UA server discovery
-│   │   │   │   └── S7Discovery.ts        # S7 device detection
-│   │   │   └── index.ts
+│   │   │   │   ├── device_manager.go     # Device lifecycle
+│   │   │   │   ├── tag_registry.go       # Unified tag namespace
+│   │   │   │   ├── normalizer.go         # Value scaling, units
+│   │   │   │   └── publisher.go          # Publish to EMQX
+│   │   │   └── discovery/
+│   │   │       ├── scanner.go            # Subnet scanning
+│   │   │       ├── opcua_discovery.go    # OPC UA server discovery
+│   │   │       └── s7_discovery.go       # S7 device detection
 │   │   ├── Dockerfile
-│   │   └── package.json
+│   │   ├── go.mod
+│   │   └── go.sum
 │   │
-│   ├── 📂 historian-service/             # Time-series data management
-│   │   ├── src/
+│   ├── 📂 historian-service/             # Time-series data management (Go)
+│   │   ├── cmd/
+│   │   │   └── historian/
+│   │   │       └── main.go               # Application entrypoint
+│   │   ├── internal/
 │   │   │   ├── ingest/
-│   │   │   │   ├── MQTTConsumer.ts       # Subscribe to EMQX topics
-│   │   │   │   ├── BatchWriter.ts        # Optimized bulk inserts
-│   │   │   │   └── DataValidator.ts
+│   │   │   │   ├── consumer.go           # Subscribe to EMQX topics
+│   │   │   │   ├── batch_writer.go       # Optimized bulk inserts (pgx COPY)
+│   │   │   │   └── validator.go
 │   │   │   ├── query/
-│   │   │   │   ├── QueryEngine.ts        # Time-range queries
-│   │   │   │   ├── AggregationEngine.ts  # Rollups, downsampling
-│   │   │   │   └── ExportService.ts      # CSV, Parquet export
-│   │   │   ├── retention/
-│   │   │   │   ├── RetentionPolicy.ts
-│   │   │   │   └── CompressionJob.ts
-│   │   │   └── index.ts
-│   │   ├── migrations/                   # Database migrations
+│   │   │   │   ├── engine.go             # Time-range queries
+│   │   │   │   ├── aggregation.go        # Rollups, downsampling
+│   │   │   │   └── export.go             # CSV, Parquet export
+│   │   │   └── retention/
+│   │   │       ├── policy.go
+│   │   │       └── compression.go
+│   │   ├── migrations/                   # Database migrations (golang-migrate)
 │   │   ├── Dockerfile
-│   │   └── package.json
+│   │   ├── go.mod
+│   │   └── go.sum
 │   │
 │   ├── 📂 flow-engine/                   # Custom flow runtime (wraps Node-RED)
 │   │   ├── src/
@@ -196,55 +202,64 @@ nexus-edge/
 │   │   ├── Dockerfile
 │   │   └── package.json
 │   │
-│   ├── 📂 orchestrator-service/          # Container/pod management
-│   │   ├── src/
+│   ├── 📂 orchestrator-service/          # Container/pod management (Go)
+│   │   ├── cmd/
+│   │   │   └── orchestrator/
+│   │   │       └── main.go               # Application entrypoint
+│   │   ├── internal/
 │   │   │   ├── drivers/
-│   │   │   │   ├── DockerDriver.ts       # Docker Engine API
-│   │   │   │   ├── KubernetesDriver.ts   # K8s API via client-go
-│   │   │   │   └── K3sDriver.ts          # K3s-specific optimizations
+│   │   │   │   ├── docker.go             # Docker Engine API (docker/docker)
+│   │   │   │   ├── kubernetes.go         # K8s API (client-go)
+│   │   │   │   └── k3s.go                # K3s-specific optimizations
 │   │   │   ├── controllers/
-│   │   │   │   ├── DeploymentController.ts
-│   │   │   │   ├── ServiceController.ts
-│   │   │   │   ├── LogsController.ts
-│   │   │   │   └── MetricsController.ts
-│   │   │   ├── catalog/
-│   │   │   │   ├── AppCatalog.ts         # Pre-built app templates
-│   │   │   │   └── ImageRegistry.ts
-│   │   │   └── index.ts
+│   │   │   │   ├── deployment.go
+│   │   │   │   ├── service.go
+│   │   │   │   ├── logs.go
+│   │   │   │   └── metrics.go
+│   │   │   └── catalog/
+│   │   │       ├── apps.go               # Pre-built app templates
+│   │   │       └── registry.go
 │   │   ├── Dockerfile
-│   │   └── package.json
+│   │   ├── go.mod
+│   │   └── go.sum
 │   │
-│   ├── 📂 alert-service/                 # Alerting & notifications
-│   │   ├── src/
+│   ├── 📂 alert-service/                 # Alerting & notifications (Go)
+│   │   ├── cmd/
+│   │   │   └── alerts/
+│   │   │       └── main.go               # Application entrypoint
+│   │   ├── internal/
 │   │   │   ├── rules/
-│   │   │   │   ├── RuleEngine.ts
-│   │   │   │   ├── ThresholdRule.ts
-│   │   │   │   ├── RateOfChangeRule.ts
-│   │   │   │   └── PatternRule.ts
+│   │   │   │   ├── engine.go
+│   │   │   │   ├── threshold.go
+│   │   │   │   ├── rate_of_change.go
+│   │   │   │   └── pattern.go
 │   │   │   ├── channels/
-│   │   │   │   ├── EmailChannel.ts
-│   │   │   │   ├── SMSChannel.ts
-│   │   │   │   ├── WebhookChannel.ts
-│   │   │   │   └── MQTTChannel.ts
-│   │   │   ├── state/
-│   │   │   │   ├── AlertStateManager.ts
-│   │   │   │   └── EscalationEngine.ts
-│   │   │   └── index.ts
+│   │   │   │   ├── email.go
+│   │   │   │   ├── sms.go
+│   │   │   │   ├── webhook.go
+│   │   │   │   └── mqtt.go
+│   │   │   └── state/
+│   │   │       ├── manager.go
+│   │   │       └── escalation.go
 │   │   ├── Dockerfile
-│   │   └── package.json
+│   │   ├── go.mod
+│   │   └── go.sum
 │   │
-│   └── 📂 cloud-agent/                   # Cloud connectivity agent
-│       ├── src/
+│   └── 📂 cloud-agent/                   # Cloud connectivity agent (Go)
+│       ├── cmd/
+│       │   └── agent/
+│       │       └── main.go               # Application entrypoint
+│       ├── internal/
 │       │   ├── sync/
-│       │   │   ├── ConfigSync.ts         # Pull config from cloud
-│       │   │   ├── DataSync.ts           # Push data to cloud
-│       │   │   └── StatusReporter.ts
-│       │   ├── ota/
-│       │   │   ├── UpdateChecker.ts
-│       │   │   └── UpdateApplier.ts
-│       │   └── index.ts
+│       │   │   ├── config.go             # Pull config from cloud
+│       │   │   ├── data.go               # Push data to cloud
+│       │   │   └── status.go
+│       │   └── ota/
+│       │       ├── checker.go
+│       │       └── applier.go
 │       ├── Dockerfile
-│       └── package.json
+│       ├── go.mod
+│       └── go.sum
 │
 ├── 📂 frontend/                          # NEXUS Control Center UI
 │   ├── 📂 src/
@@ -1175,20 +1190,28 @@ open https://<EXTERNAL-IP>
 | | Recharts, Visx | Data visualization |
 | | Zustand | State management |
 | | TanStack Query | Data fetching |
-| **Gateway** | Node.js, Express/Fastify | API Gateway |
+| **API Gateway** | TypeScript, Fastify | REST API, WebSocket proxy |
 | | jsonwebtoken | Authentication |
 | | Socket.IO | WebSocket |
-| **Protocol Gateway** | TypeScript/Rust | Protocol conversion |
-| | node-opcua | OPC UA client |
-| | snap7 (via node-snap7) | S7 protocol |
-| | modbus-serial | Modbus TCP/RTU |
+| **Protocol Gateway** | **Go** | High-performance protocol conversion |
+| | gopcua | OPC UA client |
+| | gos7 | Siemens S7 protocol |
+| | go-modbus | Modbus TCP/RTU |
+| **Historian Service** | **Go** | High-throughput data ingestion |
+| | pgx | PostgreSQL driver (COPY protocol) |
+| | paho.mqtt.golang | MQTT client |
+| **Alert Service** | **Go** | Real-time rule evaluation |
+| **Orchestrator** | **Go** | Container/K8s management |
+| | docker/docker | Docker API client |
+| | client-go | Kubernetes API |
 | **Message Broker** | EMQX 5.x | MQTT broker |
-| **Flow Engine** | Node-RED (customized) | Flow processing |
-| **Historian** | TimescaleDB 2.x | Time-series storage |
-| | (alt: InfluxDB 2.x) | |
+| **Flow Engine** | Node-RED (optional) | User-defined automation |
+| **Historian DB** | TimescaleDB 2.x | Time-series storage |
 | **Config Store** | PostgreSQL 15 | Configuration data |
 | **Orchestration** | K3s / Docker | Container management |
 | **Observability** | Prometheus, Grafana | Metrics (optional) |
+
+> **Why Go for backend services?** Go provides excellent concurrency (goroutines), low memory footprint (~10x less than Node.js), and single binary deployment. See [docs/QUESTIONS.md](docs/QUESTIONS.md) for detailed rationale.
 
 ---
 

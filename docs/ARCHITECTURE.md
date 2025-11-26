@@ -1,5 +1,7 @@
 # 🏗️ NEXUS Edge Architecture
 
+> **Technology Stack:** The backend services are primarily written in **Go** for high performance and low memory footprint. The frontend and API gateway use TypeScript. See [QUESTIONS.md](QUESTIONS.md) for detailed rationale.
+
 ## Table of Contents
 
 - [Design Principles](#design-principles)
@@ -146,7 +148,7 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
 │  │  S7 DRIVER      │  │  OPC UA DRIVER  │  │  MODBUS DRIVER  │             │
 │  │                 │  │                 │  │                 │             │
-│  │  • Snap7 lib    │  │  • node-opcua   │  │  • modbus-serial│             │
+│  │  • gos7 lib     │  │  • gopcua       │  │  • go-modbus    │             │
 │  │  • TCP/102      │  │  • Browse/Sub   │  │  • TCP/RTU      │             │
 │  │  • DB/FB/FC     │  │  • Monitored    │  │  • Holding regs │             │
 │  │    addressing   │  │    items        │  │  • Coils        │             │

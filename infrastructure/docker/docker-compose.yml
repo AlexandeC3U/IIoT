@@ -188,8 +188,9 @@ services:
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Protocol Gateway
+  # Protocol Gateway (Go)
   # Industrial protocol conversion (S7, OPC UA, Modbus → MQTT)
+  # High-performance Go service for device connectivity
   # ─────────────────────────────────────────────────────────────────────────────
   protocol-gateway:
     build:
@@ -200,20 +201,29 @@ services:
     hostname: protocol-gateway
     restart: unless-stopped
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - PORT=4000
+      - NEXUS_ENV=${NEXUS_ENV:-production}
+      - NEXUS_PORT=4000
+      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
       # MQTT connection
-      - MQTT_URL=mqtt://emqx:1883
-      - MQTT_USERNAME=${MQTT_PROTOCOL_USER:-protocol-gateway}
-      - MQTT_PASSWORD=${MQTT_PROTOCOL_PASS:-protocol_secret}
+      - NEXUS_MQTT_BROKER=tcp://emqx:1883
+      - NEXUS_MQTT_USERNAME=${MQTT_PROTOCOL_USER:-protocol-gateway}
+      - NEXUS_MQTT_PASSWORD=${MQTT_PROTOCOL_PASS:-protocol_secret}
+      - NEXUS_MQTT_CLIENT_ID=protocol-gateway-1
       # Database for device configs
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_config_secret}@postgres:5432/${POSTGRES_DB:-nexus_config}
-      # Default polling interval (ms)
-      - DEFAULT_POLL_INTERVAL=1000
+      - NEXUS_DB_HOST=postgres
+      - NEXUS_DB_PORT=5432
+      - NEXUS_DB_USER=${POSTGRES_USER:-nexus}
+      - NEXUS_DB_PASSWORD=${POSTGRES_PASSWORD:-nexus_config_secret}
+      - NEXUS_DB_NAME=${POSTGRES_DB:-nexus_config}
+      # Default polling interval
+      - NEXUS_POLL_INTERVAL_MS=1000
       # Enable protocols
-      - ENABLE_S7=true
-      - ENABLE_OPCUA=true
-      - ENABLE_MODBUS=true
+      - NEXUS_S7_ENABLED=true
+      - NEXUS_OPCUA_ENABLED=true
+      - NEXUS_MODBUS_ENABLED=true
+      # Go runtime tuning
+      - GOMAXPROCS=4
+      - GOGC=100
     ports:
       - "4000:4000"
     networks:
@@ -225,7 +235,7 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      test: ["CMD", "/app/protocol-gateway", "health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -270,8 +280,8 @@ services:
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Historian Service
-  # Data ingestion and query service for time-series data
+  # Historian Service (Go)
+  # High-throughput data ingestion using pgx COPY protocol
   # ─────────────────────────────────────────────────────────────────────────────
   historian-service:
     build:
@@ -282,18 +292,29 @@ services:
     hostname: historian-service
     restart: unless-stopped
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - PORT=7000
+      - NEXUS_ENV=${NEXUS_ENV:-production}
+      - NEXUS_PORT=7000
+      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
       # MQTT connection for data ingestion
-      - MQTT_URL=mqtt://emqx:1883
-      - MQTT_USERNAME=${MQTT_HISTORIAN_USER:-historian}
-      - MQTT_PASSWORD=${MQTT_HISTORIAN_PASS:-historian_secret}
-      - MQTT_SUBSCRIBE_TOPICS=+/+/+/#
-      # Historian database
-      - DATABASE_URL=postgresql://${HISTORIAN_USER:-nexus}:${HISTORIAN_PASSWORD:-nexus_historian_secret}@historian:5432/${HISTORIAN_DB:-nexus_historian}
-      # Batch settings
-      - BATCH_SIZE=1000
-      - BATCH_INTERVAL_MS=5000
+      - NEXUS_MQTT_BROKER=tcp://emqx:1883
+      - NEXUS_MQTT_USERNAME=${MQTT_HISTORIAN_USER:-historian}
+      - NEXUS_MQTT_PASSWORD=${MQTT_HISTORIAN_PASS:-historian_secret}
+      - NEXUS_MQTT_CLIENT_ID=historian-1
+      - NEXUS_MQTT_TOPICS=+/+/+/#
+      # Historian database (TimescaleDB)
+      - NEXUS_DB_HOST=historian
+      - NEXUS_DB_PORT=5432
+      - NEXUS_DB_USER=${HISTORIAN_USER:-nexus}
+      - NEXUS_DB_PASSWORD=${HISTORIAN_PASSWORD:-nexus_historian_secret}
+      - NEXUS_DB_NAME=${HISTORIAN_DB:-nexus_historian}
+      - NEXUS_DB_POOL_SIZE=20
+      # Batch settings for high-throughput
+      - NEXUS_BATCH_SIZE=5000
+      - NEXUS_BATCH_INTERVAL_MS=1000
+      - NEXUS_BATCH_WORKERS=4
+      # Go runtime tuning
+      - GOMAXPROCS=4
+      - GOGC=100
     ports:
       - "7000:7000"
     networks:
@@ -304,14 +325,14 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7000/health"]
+      test: ["CMD", "/app/historian", "health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Orchestrator Service
-  # Container and Kubernetes management
+  # Orchestrator Service (Go)
+  # Container and Kubernetes management using client-go/docker SDK
   # ─────────────────────────────────────────────────────────────────────────────
   orchestrator:
     build:
@@ -322,14 +343,17 @@ services:
     hostname: orchestrator
     restart: unless-stopped
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - PORT=5000
+      - NEXUS_ENV=${NEXUS_ENV:-production}
+      - NEXUS_PORT=5000
+      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
       # Container runtime
-      - CONTAINER_RUNTIME=docker  # or 'kubernetes'
+      - NEXUS_RUNTIME=docker  # or 'kubernetes'
       # Docker socket (for Docker mode)
       - DOCKER_HOST=unix:///var/run/docker.sock
       # Kubernetes config (for K8s mode)
       # - KUBECONFIG=/etc/kubernetes/admin.conf
+      # Go runtime tuning
+      - GOMAXPROCS=2
     ports:
       - "5000:5000"
     volumes:
@@ -339,14 +363,14 @@ services:
     networks:
       - nexus-internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "/app/orchestrator", "health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Alert Service
-  # Real-time alerting and notifications
+  # Alert Service (Go)
+  # Real-time rule evaluation and notifications
   # ─────────────────────────────────────────────────────────────────────────────
   alert-service:
     build:
@@ -357,20 +381,28 @@ services:
     hostname: alert-service
     restart: unless-stopped
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - PORT=6000
+      - NEXUS_ENV=${NEXUS_ENV:-production}
+      - NEXUS_PORT=6000
+      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
       # MQTT connection
-      - MQTT_URL=mqtt://emqx:1883
-      - MQTT_USERNAME=${MQTT_ALERT_USER:-alerts}
-      - MQTT_PASSWORD=${MQTT_ALERT_PASS:-alert_secret}
+      - NEXUS_MQTT_BROKER=tcp://emqx:1883
+      - NEXUS_MQTT_USERNAME=${MQTT_ALERT_USER:-alerts}
+      - NEXUS_MQTT_PASSWORD=${MQTT_ALERT_PASS:-alert_secret}
+      - NEXUS_MQTT_CLIENT_ID=alert-service-1
       # Database for alert rules and history
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_config_secret}@postgres:5432/${POSTGRES_DB:-nexus_config}
+      - NEXUS_DB_HOST=postgres
+      - NEXUS_DB_PORT=5432
+      - NEXUS_DB_USER=${POSTGRES_USER:-nexus}
+      - NEXUS_DB_PASSWORD=${POSTGRES_PASSWORD:-nexus_config_secret}
+      - NEXUS_DB_NAME=${POSTGRES_DB:-nexus_config}
       # Notification channels (configure as needed)
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASS=${SMTP_PASS:-}
-      - SMTP_FROM=${SMTP_FROM:-alerts@nexus.local}
+      - NEXUS_SMTP_HOST=${SMTP_HOST:-}
+      - NEXUS_SMTP_PORT=${SMTP_PORT:-587}
+      - NEXUS_SMTP_USER=${SMTP_USER:-}
+      - NEXUS_SMTP_PASS=${SMTP_PASS:-}
+      - NEXUS_SMTP_FROM=${SMTP_FROM:-alerts@nexus.local}
+      # Go runtime tuning
+      - GOMAXPROCS=2
     ports:
       - "6000:6000"
     networks:
