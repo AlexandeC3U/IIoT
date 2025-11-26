@@ -190,7 +190,7 @@ services:
   # ─────────────────────────────────────────────────────────────────────────────
   # Protocol Gateway (Go)
   # Industrial protocol conversion (S7, OPC UA, Modbus → MQTT)
-  # High-performance Go service for device connectivity
+  # High-performance Go service using gos7, gopcua, go-modbus libraries
   # ─────────────────────────────────────────────────────────────────────────────
   protocol-gateway:
     build:

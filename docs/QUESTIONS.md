@@ -12,7 +12,8 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 4. [Authentication & Authorization](#4️⃣-authentication--authorization)
 5. [Data Governance](#5️⃣-data-governance)
 6. [Composable Architecture](#6️⃣-composable-architecture)
-7. [Summary of Decisions](#summary-of-recommendations)
+7. [Protocol Gateway: Why Custom Go](#7️⃣-protocol-gateway-why-custom-go-instead-of-emqx-neuron)
+8. [Summary of Decisions](#summary-of-recommendations)
 
 ---
 
@@ -35,49 +36,71 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    PROTOCOL GATEWAY OPTIONS                                  │
+│                    PROTOCOL GATEWAY OPTIONS                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  OPTION A: Custom Go/Rust Service (RECOMMENDED ✅)                          │
+│  OPTION A: Custom Go/Rust Service (RECOMMENDED)                             │
 │  ─────────────────────────────────────────────────                          │
-│  • Go: Excellent for concurrent I/O (goroutines), battle-tested in IoT     │
+│  • Go: Excellent for concurrent I/O (goroutines), battle-tested in IoT      │
 │  • Libraries: gopcua, gos7, go-modbus                                       │
-│  • Benefits: Low memory, high throughput, native concurrency               │
-│  • Used by: InfluxData Telegraf, many industrial gateways                  │
+│  • Benefits: Low memory, high throughput, native concurrency                │
+│  • Used by: InfluxData Telegraf, many industrial gateways                   │
 │                                                                             │
 │  OPTION B: EMQX Neuron (Commercial/Open-source)                             │
 │  ─────────────────────────────────────────────────                          │
-│  • Native industrial protocol gateway from EMQX                            │
-│  • Supports: S7, OPC UA, Modbus, EtherNet/IP, BACnet, etc.                │
-│  • Direct integration with EMQX broker                                     │
-│  • Downside: Less customization, licensing for advanced features           │
+│  • Native industrial protocol gateway from EMQX                             │
+│  • Supports: S7, OPC UA, Modbus, EtherNet/IP, BACnet, etc.                  │
+│  • Direct integration with EMQX broker                                      │
+│  • Downside: Less customization, licensing for advanced features            │
 │                                                                             │
 │  OPTION C: Apache PLC4X                                                     │
 │  ─────────────────────────────────────────────────                          │
-│  • Universal protocol library (Java/Go)                                    │
+│  • Universal protocol library (Java/Go)                                     │
 │  • Supports most industrial protocols                                       │
-│  • Can be wrapped as a microservice                                        │
+│  • Can be wrapped as a microservice                                         │
 │                                                                             │
 │  OPTION D: EdgeX Foundry Device Services                                    │
 │  ─────────────────────────────────────────────────                          │
-│  • Linux Foundation project for IoT edge                                   │
-│  • Pre-built device services for common protocols                          │
-│  • Overkill if you only need protocol conversion                           │
+│  • Linux Foundation project for IoT edge                                    │
+│  • Pre-built device services for common protocols                           │
+│  • Overkill if you only need protocol conversion                            │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Final Decision: Hybrid Approach
+### Final Decision: Custom Go Protocol Gateway
 
-- **Protocol Gateway in Go** - Handles high-performance polling, connection pooling, reconnection logic
+- **Go Protocol Gateway** - Handles industrial protocol conversion using open-source libraries (gos7, gopcua, go-modbus)
 - **Node-RED as optional Flow Engine** - For user-defined automation, data transformation, business logic (NOT for raw device connectivity)
 
 ```
-Devices → Go Protocol Gateway → EMQX → Node-RED (optional processing) → Historian
-                    ↓
-         (high performance,        (user-defined logic,
-          reliable, concurrent)     low-code, flexible)
+                    ┌─────────────────────────────────────────────┐
+                    │         GO PROTOCOL GATEWAY                 │
+                    │                                             │
+Devices ──────────  │  ┌─────────┐ ┌─────────┐ ┌─────────┐        │
+  (S7, OPC UA,      │  │  gos7   │ │ gopcua  │ │go-modbus│        │
+   Modbus, etc.)    │  └────┬────┘ └────┬────┘ └────┬────┘        │
+                    │       └──────────┼───────────┘              │
+                    │                  ▼                          │
+                    │       ┌──────────────────────┐              │
+                    │       │  Device Manager      │              │
+                    │       │  Tag Registry        │              │
+                    │       │  MQTT Publisher      │              │
+                    │       └──────────┬───────────┘              │
+                    └──────────────────┼──────────────────────────┘
+                                       │ MQTT
+                                       ▼
+                               ┌───────────────┐
+                               │     EMQX      │
+                               │    Broker     │
+                               └───────┬───────┘
+                                       │
+                       ┌───────────────┼───────────────┐
+                       ▼               ▼               ▼
+                  Historian    Node-RED (opt)    Alert Service
 ```
+
+> **See [Question 7](#7️⃣-protocol-gateway-why-custom-go-instead-of-emqx-neuron) for detailed analysis of why we chose custom Go over EMQX Neuron.**
 
 ---
 
@@ -101,25 +124,25 @@ Devices → Go Protocol Gateway → EMQX → Node-RED (optional processing) → 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     LANGUAGE DISTRIBUTION (FINAL)                            │
+│                     LANGUAGE DISTRIBUTION (FINAL)                           │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  GO (Primary for backend services):                                         │
-│  ├── Protocol Gateway (high-performance device polling)                    │
-│  ├── Historian Ingest Service (high-throughput writes)                     │
-│  ├── Alert Service (real-time rule evaluation)                             │
-│  └── Orchestrator Service (K8s/Docker API interaction)                     │
+│  ├── Protocol Gateway (high-performance device polling)                     │
+│  ├── Historian Ingest Service (high-throughput writes)                      │
+│  ├── Alert Service (real-time rule evaluation)                              │
+│  └── Orchestrator Service (K8s/Docker API interaction)                      │
 │                                                                             │
 │  TYPESCRIPT/NODE.JS (API layer & Frontend):                                 │
-│  ├── Gateway Core (REST API, WebSocket, auth)                              │
-│  ├── Frontend (React + Vite)                                               │
-│  └── Flow Engine wrapper (if using Node-RED)                               │
+│  ├── Gateway Core (REST API, WebSocket, auth)                               │
+│  ├── Frontend (React + Vite)                                                │
+│  └── Flow Engine wrapper (if using Node-RED)                                │
 │                                                                             │
 │  PYTHON (Future AI/ML):                                                     │
-│  └── AI Inference Service (TensorFlow, PyTorch models)                     │
+│  └── AI Inference Service (TensorFlow, PyTorch models)                      │
 │                                                                             │
 │  RUST (Optional, for extreme performance):                                  │
-│  └── Custom MQTT bridge or protocol driver if needed                       │
+│  └── Custom MQTT bridge or protocol driver if needed                        │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -149,32 +172,32 @@ Devices → Go Protocol Gateway → EMQX → Node-RED (optional processing) → 
 │                                                                             │
 │  LAYER 1: Protocol Gateway (Go)                                             │
 │  ─────────────────────────────                                              │
-│  • Connection pooling per PLC/device                                       │
-│  • Batch reads (read multiple tags in single request)                      │
-│  • Adaptive polling (reduce frequency for stable values)                   │
-│  • Report-by-exception (OPC UA subscriptions vs polling)                   │
-│  • Horizontal scaling: multiple gateway instances, each handling subset    │
+│  • Connection pooling per PLC/device                                        │
+│  • Batch reads (read multiple tags in single request)                       │
+│  • Adaptive polling (reduce frequency for stable values)                    │
+│  • Report-by-exception (OPC UA subscriptions vs polling)                    │
+│  • Horizontal scaling: multiple gateway instances, each handling subset     │
 │                                                                             │
 │  LAYER 2: EMQX Broker                                                       │
 │  ─────────────────────────────                                              │
-│  • EMQX handles 100M+ connections, 1M+ msg/sec per node                   │
+│  • EMQX handles 100M+ connections, 1M+ msg/sec per node                     │
 │  • Clustering for horizontal scale                                          │
-│  • Shared subscriptions for load balancing consumers                       │
-│  • Message queuing with persistence for spikes                             │
+│  • Shared subscriptions for load balancing consumers                        │
+│  • Message queuing with persistence for spikes                              │
 │                                                                             │
 │  LAYER 3: Historian Ingestion                                               │
 │  ─────────────────────────────                                              │
-│  • Batch writes (buffer 1000-5000 points, write in batch)                 │
-│  • Connection pooling to TimescaleDB                                       │
-│  • Async writes (don't block on DB response)                               │
-│  • Multiple ingestion workers (shared subscription from MQTT)              │
+│  • Batch writes (buffer 1000-5000 points, write in batch)                   │
+│  • Connection pooling to TimescaleDB                                        │
+│  • Async writes (don't block on DB response)                                │
+│  • Multiple ingestion workers (shared subscription from MQTT)               │
 │                                                                             │
 │  LAYER 4: TimescaleDB                                                       │
 │  ─────────────────────────────                                              │
-│  • Hypertables auto-partition by time                                      │
-│  • Compression (10x+ storage reduction)                                    │
-│  • Continuous aggregates (pre-computed rollups)                            │
-│  • Read replicas for query load                                            │
+│  • Hypertables auto-partition by time                                       │
+│  • Compression (10x+ storage reduction)                                     │
+│  • Continuous aggregates (pre-computed rollups)                             │
+│  • Read replicas for query load                                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -244,32 +267,32 @@ func (w *BatchWriter) writeBatch(batch []DataPoint) {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     AUTHENTICATION OPTIONS                                   │
+│                     AUTHENTICATION OPTIONS                                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  OPTION A: Built-in Auth (Simple deployments) ✅ START HERE                │
+│  OPTION A: Built-in Auth (Simple deployments)  START HERE                   │
 │  ─────────────────────────────────────────────                              │
-│  • Local user database (PostgreSQL)                                        │
+│  • Local user database (PostgreSQL)                                         │
 │  • JWT tokens issued by Gateway Core                                        │
-│  • RBAC with roles: admin, engineer, operator, viewer                      │
-│  • Sufficient for: Single-site, small teams, isolated deployments          │
-│  • Pros: Simple, no extra infrastructure                                   │
-│  • Cons: No SSO, no federation, manual user management                     │
+│  • RBAC with roles: admin, engineer, operator, viewer                       │
+│  • Sufficient for: Single-site, small teams, isolated deployments           │
+│  • Pros: Simple, no extra infrastructure                                    │
+│  • Cons: No SSO, no federation, manual user management                      │
 │                                                                             │
-│  OPTION B: Keycloak / Auth0 / Okta (Enterprise)                            │
+│  OPTION B: Keycloak / Auth0 / Okta (Enterprise)                             │
 │  ─────────────────────────────────────────────────                          │
 │  • External Identity Provider                                               │
-│  • OIDC/OAuth2 integration                                                 │
-│  • SSO with corporate directory (LDAP/AD)                                  │
-│  • Sufficient for: Multi-site, enterprise, compliance requirements         │
-│  • Pros: Enterprise SSO, federation, MFA, audit                           │
-│  • Cons: Additional complexity, resource usage                             │
+│  • OIDC/OAuth2 integration                                                  │
+│  • SSO with corporate directory (LDAP/AD)                                   │
+│  • Sufficient for: Multi-site, enterprise, compliance requirements          │
+│  • Pros: Enterprise SSO, federation, MFA, audit                             │
+│  • Cons: Additional complexity, resource usage                              │
 │                                                                             │
-│  RECOMMENDED: Start with Built-in, add Keycloak later                      │
+│  RECOMMENDED: Start with Built-in, add Keycloak later                       │
 │  ─────────────────────────────────────────────────                          │
-│  • Design Gateway Core to support both modes                               │
-│  • Use OIDC-compatible JWT validation                                      │
-│  • Easy to switch issuer from "self" to "keycloak"                        │
+│  • Design Gateway Core to support both modes                                │
+│  • Use OIDC-compatible JWT validation                                       │
+│  • Easy to switch issuer from "self" to "keycloak"                          │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -331,46 +354,46 @@ interface AccessPolicy {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        DATA GOVERNANCE FRAMEWORK                             │
+│                        DATA GOVERNANCE FRAMEWORK                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  1. DATA LINEAGE & PROVENANCE                                               │
 │  ────────────────────────────                                               │
-│  • Every data point tracks: source device, protocol, gateway, timestamp    │
-│  • Metadata attached to MQTT messages and stored in historian              │
-│  • Query: "Where did this value come from? What transformations?"          │
+│  • Every data point tracks: source device, protocol, gateway, timestamp     │
+│  • Metadata attached to MQTT messages and stored in historian               │
+│  • Query: "Where did this value come from? What transformations?"           │
 │                                                                             │
 │  2. DATA QUALITY                                                            │
 │  ───────────────                                                            │
-│  • OPC UA quality codes preserved (Good, Bad, Uncertain)                   │
-│  • Validation rules at ingestion (range checks, type validation)           │
-│  • Quality flags stored with each data point                               │
+│  • OPC UA quality codes preserved (Good, Bad, Uncertain)                    │
+│  • Validation rules at ingestion (range checks, type validation)            │
+│  • Quality flags stored with each data point                                │
 │  • Dashboards show quality indicators                                       │
 │                                                                             │
 │  3. DATA RETENTION & LIFECYCLE                                              │
 │  ─────────────────────────────                                              │
-│  • Configurable retention policies per data class                          │
-│  • Automatic downsampling (raw → 1min → 1hour → 1day)                      │
+│  • Configurable retention policies per data class                           │
+│  • Automatic downsampling (raw → 1min → 1hour → 1day)                       │
 │  • Compression for historical data                                          │
-│  • Archival to cold storage (S3, Azure Blob) for compliance               │
+│  • Archival to cold storage (S3, Azure Blob) for compliance                 │
 │                                                                             │
 │  4. AUDIT TRAIL                                                             │
 │  ───────────────                                                            │
-│  • All configuration changes logged (who, what, when)                      │
+│  • All configuration changes logged (who, what, when)                       │
 │  • User actions audited                                                     │
-│  • Immutable audit log (append-only, no deletions)                         │
+│  • Immutable audit log (append-only, no deletions)                          │
 │  • Export for compliance reporting                                          │
 │                                                                             │
 │  5. DATA CLASSIFICATION                                                     │
 │  ─────────────────────────                                                  │
-│  • Tag data with sensitivity levels                                        │
+│  • Tag data with sensitivity levels                                         │
 │  • PII/sensitive data handling                                              │
 │  • Access controls based on classification                                  │
 │                                                                             │
 │  6. DATA CATALOG                                                            │
 │  ────────────────                                                           │
-│  • Central registry of all data points                                     │
-│  • Searchable metadata (tags, descriptions, units)                         │
+│  • Central registry of all data points                                      │
+│  • Searchable metadata (tags, descriptions, units)                          │
 │  • Relationships between data points                                        │
 │  • Documentation and context                                                │
 │                                                                             │
@@ -423,37 +446,37 @@ CREATE TABLE data_classification (
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                      COMPOSABLE ARCHITECTURE PRINCIPLES                      │
+│                      COMPOSABLE ARCHITECTURE PRINCIPLES                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  1. MICROSERVICES (Loosely Coupled)                                         │
 │  ──────────────────────────────────                                         │
-│  • Each service is independent, deployable, scalable                       │
-│  • Services communicate via MQTT (async) or REST (sync)                    │
-│  • Can replace any service without affecting others                        │
+│  • Each service is independent, deployable, scalable                        │
+│  • Services communicate via MQTT (async) or REST (sync)                     │
+│  • Can replace any service without affecting others                         │
 │                                                                             │
 │  2. PLUGIN ARCHITECTURE                                                     │
 │  ─────────────────────────                                                  │
-│  • Protocol Gateway: Add new protocols via plugins                         │
-│  • Flow Engine: Add custom nodes                                           │
+│  • Protocol Gateway: Add new protocols via plugins                          │
+│  • Flow Engine: Add custom nodes                                            │
 │  • Frontend: Add custom widgets                                             │
 │  • Alert Service: Add notification channels                                 │
 │                                                                             │
 │  3. EVENT-DRIVEN (MQTT as backbone)                                         │
 │  ──────────────────────────────────                                         │
-│  • Services react to events, not direct calls                              │
-│  • Easy to add new consumers without changing producers                    │
-│  • Enables future AI/ML services to "plug in"                              │
+│  • Services react to events, not direct calls                               │
+│  • Easy to add new consumers without changing producers                     │
+│  • Enables future AI/ML services to "plug in"                               │
 │                                                                             │
 │  4. CONTAINERIZED                                                           │
 │  ─────────────────                                                          │
-│  • Each component is a Docker container                                    │
+│  • Each component is a Docker container                                     │
 │  • Deploy only what you need                                                │
 │  • Scale components independently                                           │
 │                                                                             │
 │  5. API-FIRST                                                               │
 │  ────────────                                                               │
-│  • Every capability exposed via API                                        │
+│  • Every capability exposed via API                                         │
 │  • Enables custom integrations                                              │
 │  • Supports headless deployments                                            │
 │                                                                             │
@@ -521,16 +544,207 @@ The composable architecture enables creating "packaged" vertical solutions:
 
 ---
 
+## 7️⃣ Protocol Gateway: Why Custom Go Instead of EMQX Neuron
+
+**Question:** Should we use EMQX Neuron for protocol conversion or build a custom Go implementation?
+
+**Answer:** **Custom Go implementation.** After thorough analysis, EMQX Neuron's licensing limitations make it unsuitable for production use.
+
+### EMQX Neuron Analysis
+
+We initially considered EMQX Neuron as a quick-start option. Here's our evaluation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      EMQX NEURON LICENSING ANALYSIS                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  FREE VERSION LIMITATIONS (Verified from official EMQX docs):               │
+│  ───────────────────────────────────────────────────────────────            │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Limit Type          │  Free Version   │  Commercial License        │    │
+│  ├──────────────────────┼─────────────────┼────────────────────────────│    │
+│  │  Data Tags           │  30 tags        │  Unlimited                 │    │
+│  │  Device Connections  │  30 connections │  Unlimited                 │    │
+│  │  Time Limit          │  Unlimited      │  License period            │    │
+│  │  All Drivers         │  Included       │  Included                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Source: docs.emqx.com/en/neuronex/latest/installation/license_setting      │
+│  Docker: hub.docker.com/r/emqx/neuron (same limits apply)                   │
+│                                                                             │
+│  15-Day Trial License Available:                                            │
+│  • 100 connections, 1,000 tags                                              │
+│  • 2 trial requests per email                                               │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  WHY 30 TAGS IS NOT VIABLE:                                                 │
+│  ────────────────────────────────                                           │
+│                                                                             │
+│  Typical Industrial Setup:                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  Device Type        │  Typical Tags  │  Devices with 30-tag limit    │   │
+│  ├─────────────────────┼────────────────┼────────────────────────────── │   │
+│  │  Small PLC          │  20-50 tags    │  0-1 devices max              │   │
+│  │  Medium PLC         │  100-500 tags  │  0 devices                    │   │
+│  │  Large PLC          │  500-2000 tags │  0 devices                    │   │
+│  │  OPC UA Server      │  500-5000 tags │  0 devices                    │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  30 tags = DEMO MODE ONLY. Not viable for any real deployment.              │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  COMMERCIAL LICENSE:                                                        │
+│  ─────────────────────                                                      │
+│  • Pricing not publicly available (contact EMQX sales)                      │
+│  • Typically subscription-based per connection/tag                          │
+│  • Creates ongoing licensing cost and vendor dependency                     │
+│                                                                             │
+│  DECISION: Commercial license adds cost and dependency we want to avoid.    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Decision: Custom Go Protocol Gateway ✅
+
+Given Neuron's licensing constraints, we will implement a **custom Go Protocol Gateway** using proven open-source libraries:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      CUSTOM GO IMPLEMENTATION (CHOSEN)                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  GO PROTOCOL LIBRARIES (All MIT/Apache Licensed, No Limits):                │
+│  ───────────────────────────────────────────────────────────                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Protocol      │  Library                      │  License │ Status  │    │
+│  ├────────────────┼───────────────────────────────┼──────────┼─────────│    │
+│  │  Siemens S7    │  github.com/robinson/gos7     │  MIT     │ Mature  │    │
+│  │  OPC UA        │  github.com/gopcua/opcua      │  MIT     │ Active  │    │
+│  │  Modbus TCP    │  github.com/simonvetter/      │  MIT     │ Stable  │    │
+│  │                │  modbus                       │          │         │    │
+│  │  Modbus RTU    │  github.com/goburrow/modbus   │  BSD     │ Stable  │    │
+│  │  EtherNet/IP   │  github.com/loki-os/          │  MIT     │ Usable  │    │
+│  │                │  go-ethernet-ip               │          │         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  BENEFITS:                                                                  │
+│  • No connection limits                                                     │
+│  • No tag limits                                                            │
+│  • No licensing costs - ever                                                │
+│  • Full control over implementation                                         │
+│  • Single codebase in Go                                                    │
+│  • No vendor lock-in                                                        │
+│                                                                             │
+│  DEVELOPMENT TIMELINE:                                                      │
+│  ├── Modbus Driver (simplest):      2-3 weeks                               │
+│  ├── S7 Driver (gos7):              4-6 weeks                               │
+│  ├── OPC UA Driver (gopcua):        4-8 weeks                               │
+│  ├── Connection Management:         2-4 weeks                               │
+│  ├── Tag Discovery:                 2-4 weeks                               │
+│  └── Total for robust system:       3-6 months                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Architecture: Pure Go Protocol Gateway
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      GO PROTOCOL GATEWAY ARCHITECTURE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                      GO PROTOCOL GATEWAY                            │    │
+│  │                                                                     │    │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐   │    │
+│  │  │ S7 Driver   │  │ OPC UA      │  │ Modbus      │  │ Future    │   │    │
+│  │  │ (gos7)      │  │ (gopcua)    │  │ (go-modbus) │  │ Protocols │   │    │
+│  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘   │    │
+│  │         │                │                │               │         │    │
+│  │         └────────────────┴────────────────┴───────────────┘         │    │
+│  │                                   │                                 │    │
+│  │                        ┌──────────▼──────────┐                      │    │
+│  │                        │  DEVICE MANAGER     │                      │    │
+│  │                        │  • Connection pool  │                      │    │
+│  │                        │  • Health monitor   │                      │    │
+│  │                        │  • Reconnection     │                      │    │
+│  │                        └──────────┬──────────┘                      │    │
+│  │                                   │                                 │    │
+│  │  ┌────────────────────────────────┼────────────────────────────┐    │    │
+│  │  │                                │                            │    │    │
+│  │  ▼                                ▼                            ▼    │    │
+│  │  ┌──────────────┐  ┌──────────────────────┐  ┌──────────────────┐   │    │
+│  │  │ TAG REGISTRY │  │ DATA NORMALIZER      │  │ MQTT PUBLISHER   │   │    │
+│  │  │ • Address    │  │ • Scaling            │  │ • QoS handling   │   │    │
+│  │  │   mapping    │  │ • Unit conversion    │  │ • Batching       │   │    │
+│  │  │ • Metadata   │  │ • Quality codes      │  │ • Topic routing  │   │    │
+│  │  └──────────────┘  └──────────────────────┘  └────────┬─────────┘   │    │
+│  │                                                        │            │    │
+│  └────────────────────────────────────────────────────────┼────────────┘    │
+│                                                           │                 │
+│                                                           ▼                 │
+│                                                    ┌──────────────┐         │
+│                                                    │  EMQX BROKER │         │
+│                                                    └──────────────┘         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Comparison: Custom Go vs Neuron
+
+| Aspect | Custom Go | Neuron Free | Neuron Commercial |
+|--------|-----------|-------------|-------------------|
+| **Tag Limit** | ∞ Unlimited | 30 tags ❌ | Unlimited |
+| **Connection Limit** | ∞ Unlimited | 30 conn ❌ | Unlimited |
+| **Licensing Cost** | $0 forever | $0 | $$$ ongoing |
+| **Development Time** | 3-6 months | Days | Days |
+| **Vendor Lock-in** | None | None | EMQX |
+| **Customization** | Full control | Limited | Limited |
+| **Protocol Support** | S7, OPC UA, Modbus | 80+ | 80+ |
+| **Long-term Cost** | Dev time only | N/A (unusable) | Recurring fees |
+
+### Final Decision
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FINAL DECISION                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ✅ CHOSEN: Custom Go Protocol Gateway                                      │
+│                                                                             │
+│  Rationale:                                                                 │
+│  1. Neuron free version (30 tags/30 connections) is demo-only               │
+│  2. Commercial license adds cost and vendor dependency                      │
+│  3. Go libraries (gos7, gopcua, go-modbus) are mature and MIT licensed      │
+│  4. Full control over implementation and no artificial limits               │
+│  5. Investment in development pays off with zero ongoing license costs      │
+│                                                                             │
+│  ❌ REJECTED: EMQX Neuron                                                   │
+│                                                                             │
+│  Reason: Licensing limitations make free version unusable for production.   │
+│  Commercial license creates ongoing cost and vendor dependency.             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
 |----------|----------|
-| **Protocol Conversion** | Go-based Protocol Gateway (not Node-RED) + optional Node-RED for user logic |
+| **Protocol Conversion** | Custom **Go Protocol Gateway** using gos7, gopcua, go-modbus |
 | **Backend Language** | Polyglot: **Go** for high-performance services, TypeScript for API/Frontend |
 | **Throughput** | Batch writes, connection pooling, EMQX shared subscriptions, TimescaleDB hypertables |
 | **Auth** | Start with built-in JWT + RBAC, design for Keycloak compatibility |
 | **Data Governance** | Quality codes, lineage tracking, retention policies, audit logs, data catalog |
 | **Composable** | Already composable via microservices, MQTT events, containerization, plugin architecture |
+| **EMQX Neuron** | **Rejected** - Free version limited to 30 tags/30 connections (unusable for production) |
 
 ---
 

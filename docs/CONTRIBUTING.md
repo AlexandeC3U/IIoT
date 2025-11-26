@@ -113,17 +113,17 @@ Before contributing, please familiarize yourself with the system architecture:
 │      ▼                                                                  │
 │  Gateway Core (REST + WebSocket)                                        │
 │      │                                                                  │
-│      ├──────────────────┬──────────────────┬─────────────────────┐     │
-│      ▼                  ▼                  ▼                     ▼     │
-│  Protocol          Historian          Orchestrator           Alert    │
-│  Gateway           Service            Service                Service  │
-│      │                  │                  │                     │     │
-│      ▼                  ▼                  ▼                     │     │
-│  EMQX Broker ◄──────────────────────────────────────────────────┘     │
+│      ├──────────────────┬──────────────────┬─────────────────────┐      │
+│      ▼                  ▼                  ▼                     ▼      │
+│  Protocol          Historian          Orchestrator           Alert      │
+│  Gateway           Service            Service                Service    │
+│      │                  │                  │                     │      │
+│      ▼                  ▼                  ▼                     │      │
+│  EMQX Broker ◄──────────────────────────────────────────────────┘       │
 │      │                                                                  │
 │      ▼                                                                  │
-│  TimescaleDB                          PostgreSQL                       │
-│  (Historian)                          (Config)                         │
+│  TimescaleDB                          PostgreSQL                        │
+│  (Historian)                          (Config)                          │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```

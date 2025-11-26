@@ -23,24 +23,24 @@ NEXUS is designed to operate **autonomously at the edge**, with cloud connectivi
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           OPERATIONAL HIERARCHY                              │
+│                           OPERATIONAL HIERARCHY                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │   Level 4: Cloud (Optional)                                                 │
-│   ├── Fleet management, analytics aggregation, model training              │
+│   ├── Fleet management, analytics aggregation, model training               │
 │   └── Can be disconnected indefinitely                                      │
 │                                                                             │
-│   Level 3: NEXUS Edge Platform ← PRIMARY INTELLIGENCE                      │
-│   ├── All processing, storage, visualization                               │
-│   ├── Must always be operational                                           │
-│   └── Survives network partitions                                          │
+│   Level 3: NEXUS Edge Platform ← PRIMARY INTELLIGENCE                       │
+│   ├── All processing, storage, visualization                                │
+│   ├── Must always be operational                                            │
+│   └── Survives network partitions                                           │
 │                                                                             │
 │   Level 2: Protocol Gateways                                                │
-│   ├── Direct connection to OT devices                                      │
-│   └── Hardware-level reliability                                           │
+│   ├── Direct connection to OT devices                                       │
+│   └── Hardware-level reliability                                            │
 │                                                                             │
-│   Level 1: Field Devices (PLCs, Sensors)                                   │
-│   └── Physical process control                                             │
+│   Level 1: Field Devices (PLCs, Sensors)                                    │
+│   └── Physical process control                                              │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -79,29 +79,29 @@ Services are **loosely coupled** through MQTT messaging:
 │                      SERVICE COMMUNICATION PATTERNS                          │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│   PRIMARY: MQTT Pub/Sub (Event-Driven)                                      │
-│   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  Protocol    ───publish───▶  EMQX  ◀───subscribe───  Historian     │    │
-│   │  Gateway                      Broker                 Service       │    │
-│   │                                 │                                  │    │
-│   │              Flow Engine ◀──────┴──────▶ Alert Service             │    │
-│   └────────────────────────────────────────────────────────────────────┘    │
+│   PRIMARY: MQTT Pub/Sub (Event-Driven)                                       │
+│   ┌────────────────────────────────────────────────────────────────────┐     │
+│   │  Protocol    ───publish───▶  EMQX  ◀───subscribe───  Historian    │     │
+│   │  Gateway                      Broker                 Service       │     │
+│   │                                 │                                  │     │
+│   │              Flow Engine ◀───── ┴──────▶ Alert Service            │     │
+│   └────────────────────────────────────────────────────────────────────┘     │
 │                                                                              │
-│   SECONDARY: REST API (Request/Response)                                    │
-│   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  Frontend  ───HTTP───▶  Gateway  ───HTTP───▶  Services             │    │
-│   │     UI                   Core                                      │    │
-│   │                            │                                       │    │
-│   │                      ┌─────┴─────┐                                 │    │
-│   │                      ▼           ▼                                 │    │
-│   │               PostgreSQL   TimescaleDB                             │    │
-│   └────────────────────────────────────────────────────────────────────┘    │
+│   SECONDARY: REST API (Request/Response)                                     │
+│   ┌────────────────────────────────────────────────────────────────────┐     │
+│   │  Frontend  ───HTTP───▶  Gateway  ───HTTP───▶  Services            │     │
+│   │     UI                   Core                                      │     │
+│   │                            │                                       │     │
+│   │                      ┌─────┴─────┐                                 │     │
+│   │                      ▼           ▼                                 │     │
+│   │               PostgreSQL   TimescaleDB                             │     │
+│   └────────────────────────────────────────────────────────────────────┘     │
 │                                                                              │
-│   TERTIARY: WebSocket (Real-Time Push)                                      │
-│   ┌────────────────────────────────────────────────────────────────────┐    │
-│   │  Browser  ◀───WebSocket───  Gateway  ◀───MQTT───  Broker           │    │
-│   │                              Core                                  │    │
-│   └────────────────────────────────────────────────────────────────────┘    │
+│   TERTIARY: WebSocket (Real-Time Push)                                       │
+│   ┌────────────────────────────────────────────────────────────────────┐     │
+│   │  Browser  ◀───WebSocket───  Gateway  ◀───MQTT───  Broker          │     │
+│   │                              Core                                  │     │
+│   └────────────────────────────────────────────────────────────────────┘     │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -142,35 +142,35 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          CONNECTIVITY LAYER                                  │
+│                          CONNECTIVITY LAYER                                 │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
-│  │  S7 DRIVER      │  │  OPC UA DRIVER  │  │  MODBUS DRIVER  │             │
-│  │                 │  │                 │  │                 │             │
-│  │  • gos7 lib     │  │  • gopcua       │  │  • go-modbus    │             │
-│  │  • TCP/102      │  │  • Browse/Sub   │  │  • TCP/RTU      │             │
-│  │  • DB/FB/FC     │  │  • Monitored    │  │  • Holding regs │             │
-│  │    addressing   │  │    items        │  │  • Coils        │             │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
+│  │  S7 DRIVER      │  │  OPC UA DRIVER  │  │  MODBUS DRIVER  │              │
+│  │                 │  │                 │  │                 │              │
+│  │  • gos7 lib     │  │  • gopcua       │  │  • go-modbus    │              │
+│  │  • TCP/102      │  │  • Browse/Sub   │  │  • TCP/RTU      │              │
+│  │  • DB/FB/FC     │  │  • Monitored    │  │  • Holding regs │              │
+│  │    addressing   │  │    items        │  │  • Coils        │              │
+│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘              │
 │           │                    │                    │                       │
 │           └────────────────────┼────────────────────┘                       │
 │                                │                                            │
-│                     ┌──────────▼──────────┐                                │
-│                     │  TAG REGISTRY       │                                │
-│                     │                     │                                │
-│                     │  • Tag ↔ Topic map  │                                │
-│                     │  • Scaling/Units    │                                │
-│                     │  • Quality flags    │                                │
-│                     └──────────┬──────────┘                                │
+│                     ┌──────────▼──────────┐                                 │
+│                     │  TAG REGISTRY       │                                 │
+│                     │                     │                                 │
+│                     │  • Tag ↔ Topic map  │                                 │
+│                     │  • Scaling/Units    │                                 │
+│                     │  • Quality flags    │                                 │
+│                     └──────────┬──────────┘                                 │
 │                                │                                            │
-│                     ┌──────────▼──────────┐                                │
-│                     │  MQTT PUBLISHER     │                                │
-│                     │                     │                                │
-│                     │  • QoS selection    │                                │
-│                     │  • Batch/throttle   │                                │
-│                     │  • Reconnection     │                                │
-│                     └──────────┬──────────┘                                │
+│                     ┌──────────▼──────────┐                                 │
+│                     │  MQTT PUBLISHER     │                                 │
+│                     │                     │                                 │
+│                     │  • QoS selection    │                                 │
+│                     │  • Batch/throttle   │                                 │
+│                     │  • Reconnection     │                                 │
+│                     └──────────┬──────────┘                                 │
 │                                │                                            │
 └────────────────────────────────┼────────────────────────────────────────────┘
                                  │
@@ -184,41 +184,41 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           EMQX BROKER                                        │
+│                           EMQX BROKER                                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  LISTENERS                                                           │   │
-│  │  ├── TCP:1883      (internal services)                              │   │
-│  │  ├── SSL:8883      (external devices with TLS)                      │   │
-│  │  ├── WS:8083       (WebSocket for browser)                          │   │
-│  │  └── WSS:8084      (Secure WebSocket)                               │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  LISTENERS                                                          │    │
+│  │  ├── TCP:1883      (internal services)                              │    │
+│  │  ├── SSL:8883      (external devices with TLS)                      │    │
+│  │  ├── WS:8083       (WebSocket for browser)                          │    │
+│  │  └── WSS:8084      (Secure WebSocket)                               │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  AUTHENTICATION                                                      │   │
-│  │  ├── Built-in database (username/password per service)             │   │
-│  │  ├── JWT tokens (for browser WebSocket)                             │   │
-│  │  └── X.509 certificates (for device authentication)                 │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  AUTHENTICATION                                                     │    │
+│  │  ├── Built-in database (username/password per service)              │    │
+│  │  ├── JWT tokens (for browser WebSocket)                             │    │
+│  │  └── X.509 certificates (for device authentication)                 │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  ACL (Access Control)                                                │   │
-│  │                                                                      │   │
-│  │  protocol-gateway: pub +/+/+/+/+/#    (publish device data)        │   │
-│  │  historian:        sub +/+/+/+/+/#    (subscribe to all data)      │   │
-│  │  flow-engine:      pub/sub +/#        (full access for flows)      │   │
-│  │  alert-service:    sub +/+/+/+/+/#    (read for alerting)          │   │
-│  │  frontend:         sub user/{uid}/#   (user-specific subscriptions)│   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  ACL (Access Control)                                               │    │
+│  │                                                                     │    │
+│  │  protocol-gateway: pub +/+/+/+/+/#    (publish device data)         │    │
+│  │  historian:        sub +/+/+/+/+/#    (subscribe to all data)       │    │
+│  │  flow-engine:      pub/sub +/#        (full access for flows)       │    │
+│  │  alert-service:    sub +/+/+/+/+/#    (read for alerting)           │    │
+│  │  frontend:         sub user/{uid}/#   (user-specific subscriptions) │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  RULE ENGINE (Optional Direct DB Write)                             │   │
-│  │                                                                      │   │
-│  │  Rule: "Forward to TimescaleDB"                                     │   │
-│  │  ├── SELECT * FROM "acme/#"                                         │   │
-│  │  └── INSERT INTO historian.metrics (topic, payload, ts)            │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  RULE ENGINE (Optional Direct DB Write)                             │    │
+│  │                                                                     │    │
+│  │  Rule: "Forward to TimescaleDB"                                     │    │
+│  │  ├── SELECT * FROM "acme/#"                                         │    │
+│  │  └── INSERT INTO historian.metrics (topic, payload, ts)             │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -229,47 +229,47 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          PROCESSING LAYER                                    │
+│                          PROCESSING LAYER                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  FLOW ENGINE (Node-RED Runtime)                                      │   │
-│  │                                                                      │   │
-│  │  ┌───────────┐    ┌───────────┐    ┌───────────┐    ┌───────────┐  │   │
-│  │  │ MQTT In   │───▶│ Transform │───▶│ Function  │───▶│ MQTT Out  │  │   │
-│  │  │ Subscribe │    │ Parse/Map │    │ Custom JS │    │ Publish   │  │   │
-│  │  └───────────┘    └───────────┘    └───────────┘    └───────────┘  │   │
-│  │                                                                      │   │
-│  │  ┌───────────┐    ┌───────────┐    ┌───────────┐                   │   │
-│  │  │ Device    │───▶│ Aggregate │───▶│ Historian │                   │   │
-│  │  │ Read      │    │ Window    │    │ Write     │                   │   │
-│  │  └───────────┘    └───────────┘    └───────────┘                   │   │
-│  │                                                                      │   │
-│  │  Custom NEXUS Nodes:                                                 │   │
-│  │  • nexus-device-read    - Direct device query                       │   │
-│  │  • nexus-device-write   - Write to PLC/device                       │   │
-│  │  • nexus-historian      - Query time-series                         │   │
-│  │  • nexus-alert          - Trigger/clear alerts                      │   │
-│  │  • nexus-ai-inference   - Run ML model                              │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  FLOW ENGINE (Node-RED Runtime)                                     │    │
+│  │                                                                     │    │
+│  │  ┌───────────┐    ┌───────────┐    ┌───────────┐    ┌───────────┐   │    │
+│  │  │ MQTT In   │──▶│ Transform │───▶│ Function  │──▶│ MQTT Out  │   │    │
+│  │  │ Subscribe │    │ Parse/Map │    │ Custom JS │    │ Publish   │   │    │
+│  │  └───────────┘    └───────────┘    └───────────┘    └───────────┘   │    │
+│  │                                                                     │    │
+│  │  ┌───────────┐    ┌───────────┐    ┌───────────┐                    │    │
+│  │  │ Device    │──▶│ Aggregate │───▶│ Historian │                    │    │
+│  │  │ Read      │    │ Window    │    │ Write     │                    │    │
+│  │  └───────────┘    └───────────┘    └───────────┘                    │    │
+│  │                                                                     │    │
+│  │  Custom NEXUS Nodes:                                                │    │
+│  │  • nexus-device-read    - Direct device query                       │    │
+│  │  • nexus-device-write   - Write to PLC/device                       │    │
+│  │  • nexus-historian      - Query time-series                         │    │
+│  │  • nexus-alert          - Trigger/clear alerts                      │    │
+│  │  • nexus-ai-inference   - Run ML model                              │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  ALERT SERVICE                                                       │   │
-│  │                                                                      │   │
-│  │  Rule Types:                                                         │   │
-│  │  ├── Threshold      (value > limit for duration)                    │   │
-│  │  ├── Rate of Change (delta > limit in window)                       │   │
-│  │  ├── Pattern        (regex on string values)                        │   │
-│  │  ├── Absence        (no data for duration)                          │   │
-│  │  └── Compound       (AND/OR of other rules)                         │   │
-│  │                                                                      │   │
-│  │  Alert Lifecycle:                                                    │   │
-│  │  [Normal] ──trigger──▶ [Active] ──ack──▶ [Acknowledged]             │   │
-│  │                           │                    │                     │   │
-│  │                        clear                 clear                   │   │
-│  │                           ▼                    ▼                     │   │
-│  │                       [Normal]            [Normal]                   │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  ALERT SERVICE                                                      │    │
+│  │                                                                     │    │
+│  │  Rule Types:                                                        │    │
+│  │  ├── Threshold      (value > limit for duration)                    │    │
+│  │  ├── Rate of Change (delta > limit in window)                       │    │
+│  │  ├── Pattern        (regex on string values)                        │    │
+│  │  ├── Absence        (no data for duration)                          │    │
+│  │  └── Compound       (AND/OR of other rules)                         │    │
+│  │                                                                     │    │
+│  │  Alert Lifecycle:                                                   │    │
+│  │  [Normal] ──trigger──▶ [Active] ──ack──▶ [Acknowledged]            │    │
+│  │                           │                    │                    │    │
+│  │                        clear                 clear                  │    │
+│  │                           ▼                    ▼                    │    │
+│  │                       [Normal]            [Normal]                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -280,47 +280,47 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         PERSISTENCE LAYER                                    │
+│                         PERSISTENCE LAYER                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  TIMESCALEDB (Historian)                                             │   │
-│  │                                                                      │   │
-│  │  Tables:                                                             │   │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │   │
-│  │  │  metrics (hypertable)                                        │    │   │
-│  │  │  ├── time        TIMESTAMPTZ NOT NULL                       │    │   │
-│  │  │  ├── topic       TEXT NOT NULL                              │    │   │
-│  │  │  ├── value       DOUBLE PRECISION                           │    │   │
-│  │  │  ├── value_str   TEXT                                       │    │   │
-│  │  │  ├── quality     SMALLINT DEFAULT 192                       │    │   │
-│  │  │  └── metadata    JSONB                                      │    │   │
-│  │  │                                                              │    │   │
-│  │  │  Compression: After 7 days (segment by topic)               │    │   │
-│  │  │  Retention: Raw=30d, Hourly=1y, Daily=5y                    │    │   │
-│  │  └─────────────────────────────────────────────────────────────┘    │   │
-│  │                                                                      │   │
-│  │  Continuous Aggregates:                                              │   │
-│  │  ├── metrics_1min  (1-minute rollups)                               │   │
-│  │  ├── metrics_1hour (1-hour rollups)                                 │   │
-│  │  └── metrics_1day  (1-day rollups)                                  │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  TIMESCALEDB (Historian)                                            │    │
+│  │                                                                     │    │
+│  │  Tables:                                                            │    │
+│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
+│  │  │  metrics (hypertable)                                       │    │    │
+│  │  │  ├── time        TIMESTAMPTZ NOT NULL                       │    │    │
+│  │  │  ├── topic       TEXT NOT NULL                              │    │    │
+│  │  │  ├── value       DOUBLE PRECISION                           │    │    │
+│  │  │  ├── value_str   TEXT                                       │    │    │
+│  │  │  ├── quality     SMALLINT DEFAULT 192                       │    │    │
+│  │  │  └── metadata    JSONB                                      │    │    │
+│  │  │                                                             │    │    │
+│  │  │  Compression: After 7 days (segment by topic)               │    │    │
+│  │  │  Retention: Raw=30d, Hourly=1y, Daily=5y                    │    │    │
+│  │  └─────────────────────────────────────────────────────────────┘    │    │
+│  │                                                                     │    │
+│  │  Continuous Aggregates:                                             │    │
+│  │  ├── metrics_1min  (1-minute rollups)                               │    │
+│  │  ├── metrics_1hour (1-hour rollups)                                 │    │
+│  │  └── metrics_1day  (1-day rollups)                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  POSTGRESQL (Configuration)                                          │   │
-│  │                                                                      │   │
-│  │  Tables:                                                             │   │
-│  │  ├── users           (authentication, roles)                        │   │
-│  │  ├── devices         (device configurations)                        │   │
-│  │  ├── device_tags     (tag mappings per device)                      │   │
-│  │  ├── flows           (Node-RED flow definitions)                    │   │
-│  │  ├── dashboards      (dashboard layouts)                            │   │
-│  │  ├── widgets         (widget configurations)                        │   │
-│  │  ├── alert_rules     (alerting rules)                               │   │
-│  │  ├── alert_history   (triggered alerts log)                         │   │
-│  │  ├── audit_log       (security audit trail)                         │   │
-│  │  └── system_config   (key-value settings)                           │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  POSTGRESQL (Configuration)                                         │    │
+│  │                                                                     │    │
+│  │  Tables:                                                            │    │
+│  │  ├── users           (authentication, roles)                        │    │
+│  │  ├── devices         (device configurations)                        │    │
+│  │  ├── device_tags     (tag mappings per device)                      │    │
+│  │  ├── flows           (Node-RED flow definitions)                    │    │
+│  │  ├── dashboards      (dashboard layouts)                            │    │
+│  │  ├── widgets         (widget configurations)                        │    │
+│  │  ├── alert_rules     (alerting rules)                               │    │
+│  │  ├── alert_history   (triggered alerts log)                         │    │
+│  │  ├── audit_log       (security audit trail)                         │    │
+│  │  └── system_config   (key-value settings)                           │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -331,41 +331,41 @@ Instead of embedding third-party UIs, NEXUS implements **native React components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        PRESENTATION LAYER                                    │
+│                        PRESENTATION LAYER                                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  GATEWAY CORE (API Gateway)                                          │   │
-│  │                                                                      │   │
-│  │  ├── Authentication (JWT, API Keys)                                 │   │
-│  │  ├── Authorization (RBAC middleware)                                │   │
-│  │  ├── Rate Limiting                                                  │   │
-│  │  ├── Request Logging                                                │   │
-│  │  ├── WebSocket Manager                                              │   │
-│  │  │   └── MQTT → WebSocket bridge                                   │   │
-│  │  └── Route Handlers                                                 │   │
-│  │      ├── /api/auth/*        → Auth service                         │   │
-│  │      ├── /api/devices/*     → Protocol Gateway                     │   │
-│  │      ├── /api/flows/*       → Flow Engine                          │   │
-│  │      ├── /api/historian/*   → Historian Service                    │   │
-│  │      ├── /api/containers/*  → Orchestrator                         │   │
-│  │      └── /api/alerts/*      → Alert Service                        │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  GATEWAY CORE (API Gateway)                                         │    │
+│  │                                                                     │    │
+│  │  ├── Authentication (JWT, API Keys)                                 │    │
+│  │  ├── Authorization (RBAC middleware)                                │    │
+│  │  ├── Rate Limiting                                                  │    │
+│  │  ├── Request Logging                                                │    │
+│  │  ├── WebSocket Manager                                              │    │
+│  │  │   └── MQTT → WebSocket bridge                                    │    │
+│  │  └── Route Handlers                                                 │    │
+│  │      ├── /api/auth/*        → Auth service                          │    │
+│  │      ├── /api/devices/*     → Protocol Gateway                      │    │
+│  │      ├── /api/flows/*       → Flow Engine                           │    │
+│  │      ├── /api/historian/*   → Historian Service                     │    │
+│  │      ├── /api/containers/*  → Orchestrator                          │    │
+│  │      └── /api/alerts/*      → Alert Service                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  NEXUS CONTROL CENTER (React SPA)                                    │   │
-│  │                                                                      │   │
-│  │  ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐     │   │
-│  │  │Dashboard│ Devices │  Flows  │Historian│Container│  Alerts │     │   │
-│  │  │         │ Manager │ Designer│ Explorer│ Manager │  Center │     │   │
-│  │  └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘     │   │
-│  │                                                                      │   │
-│  │  State Management: Zustand                                           │   │
-│  │  Data Fetching: TanStack Query                                       │   │
-│  │  Real-time: Custom WebSocket hooks                                   │   │
-│  │  Visualization: Recharts, React Flow                                 │   │
-│  │  Styling: TailwindCSS + Radix UI                                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  NEXUS CONTROL CENTER (React SPA)                                   │    │
+│  │                                                                     │    │
+│  │  ┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐      │    │
+│  │  │Dashboard│ Devices │  Flows  │Historian│Container│  Alerts │      │    │
+│  │  │         │ Manager │ Designer│ Explorer│ Manager │  Center │      │    │
+│  │  └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘      │    │
+│  │                                                                     │    │
+│  │  State Management: Zustand                                          │    │
+│  │  Data Fetching: TanStack Query                                      │    │
+│  │  Real-time: Custom WebSocket hooks                                  │    │
+│  │  Visualization: Recharts, React Flow                                │    │
+│  │  Styling: TailwindCSS + Radix UI                                    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -569,39 +569,41 @@ interface CompoundCondition {
 │                          S7 PROTOCOL INTEGRATION                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Supported PLCs:                                                            │
-│  ├── S7-300 / S7-400 (Classic)                                             │
-│  ├── S7-1200 (Optimized blocks need "allow PUT/GET")                       │
-│  └── S7-1500 (Optimized blocks need "allow PUT/GET")                       │
+│  Go Library: github.com/robinson/gos7 (MIT License)                         │
 │                                                                             │
-│  Addressing:                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Format: DB{n}.DB{type}{offset}[.{bit}]                             │   │
-│  │                                                                      │   │
-│  │  Examples:                                                           │   │
-│  │  ├── DB1.DBD0      → REAL at byte 0 of DB1                          │   │
-│  │  ├── DB1.DBW4      → INT at byte 4 of DB1                           │   │
-│  │  ├── DB1.DBB8      → BYTE at byte 8 of DB1                          │   │
-│  │  ├── DB1.DBX9.0    → BOOL at byte 9, bit 0 of DB1                   │   │
-│  │  ├── I0.0          → Input bit 0.0                                  │   │
-│  │  ├── Q0.1          → Output bit 0.1                                 │   │
-│  │  ├── M10.0         → Marker bit 10.0                                │   │
-│  │  └── MW20          → Marker word at byte 20                         │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  Supported PLCs:                                                            │
+│  ├── S7-300 / S7-400 (Classic)                                              │
+│  ├── S7-1200 (Optimized blocks need "allow PUT/GET")                        │
+│  └── S7-1500 (Optimized blocks need "allow PUT/GET")                        │
+│                                                                             │
+│  Addressing:                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Format: DB{n}.DB{type}{offset}[.{bit}]                             │    │
+│  │                                                                     │    │
+│  │  Examples:                                                          │    │
+│  │  ├── DB1.DBD0      → REAL at byte 0 of DB1                          │    │
+│  │  ├── DB1.DBW4      → INT at byte 4 of DB1                           │    │
+│  │  ├── DB1.DBB8      → BYTE at byte 8 of DB1                          │    │
+│  │  ├── DB1.DBX9.0    → BOOL at byte 9, bit 0 of DB1                   │    │
+│  │  ├── I0.0          → Input bit 0.0                                  │    │
+│  │  ├── Q0.1          → Output bit 0.1                                 │    │
+│  │  ├── M10.0         → Marker bit 10.0                                │    │
+│  │  └── MW20          → Marker word at byte 20                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 │  Data Type Mapping:                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  S7 Type    │  NEXUS Type  │  Description                          │   │
-│  │  ──────────────────────────────────────────────────────────────── │   │
-│  │  BOOL       │  boolean     │  Single bit                           │   │
-│  │  BYTE       │  number      │  Unsigned 8-bit                       │   │
-│  │  WORD       │  number      │  Unsigned 16-bit                      │   │
-│  │  DWORD      │  number      │  Unsigned 32-bit                      │   │
-│  │  INT        │  number      │  Signed 16-bit                        │   │
-│  │  DINT       │  number      │  Signed 32-bit                        │   │
-│  │  REAL       │  number      │  32-bit float                         │   │
-│  │  S7STRING   │  string      │  Variable-length string               │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  S7 Type    │  NEXUS Type  │  Description                           │    │
+│  │  ────────────────────────────────────────────────────────────────   │    │
+│  │  BOOL       │  boolean     │  Single bit                            │    │
+│  │  BYTE       │  number      │  Unsigned 8-bit                        │    │
+│  │  WORD       │  number      │  Unsigned 16-bit                       │    │
+│  │  DWORD      │  number      │  Unsigned 32-bit                       │    │
+│  │  INT        │  number      │  Signed 16-bit                         │    │
+│  │  DINT       │  number      │  Signed 32-bit                         │    │
+│  │  REAL       │  number      │  32-bit float                          │    │
+│  │  S7STRING   │  string      │  Variable-length string                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -613,38 +615,40 @@ interface CompoundCondition {
 │                         OPC UA PROTOCOL INTEGRATION                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
+│  Go Library: github.com/gopcua/opcua (MIT License)                          │
+│                                                                             │
 │  Features:                                                                  │
-│  ├── Automatic server discovery (LDS)                                      │
-│  ├── Address space browsing                                                │
-│  ├── Subscription-based monitoring                                         │
-│  ├── Security: None, Sign, SignAndEncrypt                                  │
-│  └── Authentication: Anonymous, Username, Certificate                      │
+│  ├── Automatic server discovery (LDS)                                       │
+│  ├── Address space browsing                                                 │
+│  ├── Subscription-based monitoring                                          │
+│  ├── Security: None, Sign, SignAndEncrypt                                   │
+│  └── Authentication: Anonymous, Username, Certificate                       │
 │                                                                             │
 │  Node Addressing:                                                           │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Format: ns={namespace};{identifier_type}={identifier}              │   │
-│  │                                                                      │   │
-│  │  Identifier Types:                                                   │   │
-│  │  ├── i  - Numeric identifier                                        │   │
-│  │  ├── s  - String identifier                                         │   │
-│  │  ├── g  - GUID identifier                                           │   │
-│  │  └── b  - Opaque (base64) identifier                                │   │
-│  │                                                                      │   │
-│  │  Examples:                                                           │   │
-│  │  ├── ns=2;s=Channel1.Device1.Tag1                                   │   │
-│  │  ├── ns=3;i=1001                                                    │   │
-│  │  └── ns=2;s=Objects.PLC1.DataBlock1.Temperature                     │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Format: ns={namespace};{identifier_type}={identifier}              │    │
+│  │                                                                     │    │
+│  │  Identifier Types:                                                  │    │
+│  │  ├── i  - Numeric identifier                                        │    │
+│  │  ├── s  - String identifier                                         │    │
+│  │  ├── g  - GUID identifier                                           │    │
+│  │  └── b  - Opaque (base64) identifier                                │    │
+│  │                                                                     │    │
+│  │  Examples:                                                          │    │
+│  │  ├── ns=2;s=Channel1.Device1.Tag1                                   │    │
+│  │  ├── ns=3;i=1001                                                    │    │
+│  │  └── ns=2;s=Objects.PLC1.DataBlock1.Temperature                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 │  Tag Discovery Flow:                                                        │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  1. Connect to OPC UA server endpoint                               │   │
-│  │  2. Browse root node (Objects folder)                               │   │
-│  │  3. Recursively browse child nodes                                  │   │
-│  │  4. Filter for Variable nodes (readable tags)                       │   │
-│  │  5. Return tree structure to UI for selection                       │   │
-│  │  6. Create subscriptions for selected nodes                         │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  1. Connect to OPC UA server endpoint                               │    │ 
+│  │  2. Browse root node (Objects folder)                               │    │
+│  │  3. Recursively browse child nodes                                  │    │
+│  │  4. Filter for Variable nodes (readable tags)                       │    │
+│  │  5. Return tree structure to UI for selection                       │    │
+│  │  6. Create subscriptions for selected nodes                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -656,34 +660,36 @@ interface CompoundCondition {
 │                        MODBUS PROTOCOL INTEGRATION                          │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
+│  Go Library: github.com/simonvetter/modbus (MIT License)                    │
+│                                                                             │
 │  Supported Variants:                                                        │
-│  ├── Modbus TCP (port 502)                                                 │
-│  ├── Modbus RTU over TCP                                                   │
-│  └── Modbus RTU over Serial (via USB adapter)                              │
+│  ├── Modbus TCP (port 502)                                                  │
+│  ├── Modbus RTU over TCP                                                    │
+│  └── Modbus RTU over Serial (via USB adapter)                               │
 │                                                                             │
 │  Register Types:                                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Type            │ Address Range  │ Access │ Function Codes         │   │
-│  │  ────────────────────────────────────────────────────────────────── │   │
-│  │  Coils           │ 00001-09999   │ R/W    │ FC01, FC05, FC15        │   │
-│  │  Discrete Inputs │ 10001-19999   │ R      │ FC02                    │   │
-│  │  Input Registers │ 30001-39999   │ R      │ FC04                    │   │
-│  │  Holding Regs    │ 40001-49999   │ R/W    │ FC03, FC06, FC16        │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Type            │ Address Range  │ Access │ Function Codes         │    │
+│  │  ────────────────────────────────────────────────────────────────── │    │
+│  │  Coils           │ 00001-09999   │ R/W    │ FC01, FC05, FC15        │    │
+│  │  Discrete Inputs │ 10001-19999   │ R      │ FC02                    │    │
+│  │  Input Registers │ 30001-39999   │ R      │ FC04                    │    │
+│  │  Holding Regs    │ 40001-49999   │ R/W    │ FC03, FC06, FC16        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 │  Addressing in NEXUS:                                                       │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Format: {register_type}:{address}[:{data_type}]                    │   │
-│  │                                                                      │   │
-│  │  Register Types: coil, discrete, input, holding                     │   │
-│  │  Data Types (for registers): uint16, int16, uint32, int32, float32  │   │
-│  │                                                                      │   │
-│  │  Examples:                                                           │   │
-│  │  ├── holding:40001:uint16    → Single holding register              │   │
-│  │  ├── holding:40001:float32   → Two registers as 32-bit float        │   │
-│  │  ├── coil:00001              → Single coil (boolean)                │   │
-│  │  └── input:30001:int32       → Two input registers as signed 32-bit │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Format: {register_type}:{address}[:{data_type}]                    │    │
+│  │                                                                     │    │
+│  │  Register Types: coil, discrete, input, holding                     │    │
+│  │  Data Types (for registers): uint16, int16, uint32, int32, float32  │    │
+│  │                                                                     │    │
+│  │  Examples:                                                          │    │
+│  │  ├── holding:40001:uint16    → Single holding register              │    │
+│  │  ├── holding:40001:float32   → Two registers as 32-bit float        │    │
+│  │  ├── coil:00001              → Single coil (boolean)                │    │
+│  │  └── input:30001:int32       → Two input registers as signed 32-bit │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
