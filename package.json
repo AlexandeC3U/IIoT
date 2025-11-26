@@ -1,0 +1,72 @@
+{
+  "name": "nexus-edge",
+  "version": "0.1.0",
+  "description": "Industrial IoT Edge Platform - Unified connectivity, processing, and visualization for industrial systems",
+  "private": true,
+  "license": "Apache-2.0",
+  "author": "NEXUS Edge Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nexus-edge/nexus-edge.git"
+  },
+  "keywords": [
+    "iiot",
+    "industrial-iot",
+    "edge-computing",
+    "mqtt",
+    "opc-ua",
+    "siemens-s7",
+    "modbus",
+    "historian",
+    "timescale",
+    "scada"
+  ],
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "test:watch": "pnpm -r --parallel test:watch",
+    "test:coverage": "pnpm -r test:coverage",
+    "test:e2e": "pnpm -r test:e2e",
+    "lint": "pnpm -r lint",
+    "lint:fix": "pnpm -r lint:fix",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "clean": "pnpm -r clean && rm -rf node_modules",
+    "docker:up": "cd infrastructure/docker && docker-compose up -d",
+    "docker:down": "cd infrastructure/docker && docker-compose down",
+    "docker:logs": "cd infrastructure/docker && docker-compose logs -f",
+    "docker:build": "cd infrastructure/docker && docker-compose build",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@8.12.0",
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yaml,yml}": [
+      "prettier --write"
+    ]
+  },
+  "prettier": {
+    "semi": true,
+    "singleQuote": true,
+    "tabWidth": 2,
+    "trailingComma": "es5",
+    "printWidth": 100
+  }
+}
+

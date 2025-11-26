@@ -1,0 +1,16 @@
+# NEXUS Edge - pnpm Workspace Configuration
+# This file defines the monorepo structure for the platform
+
+packages:
+  # Frontend application
+  - 'frontend'
+  
+  # Backend services
+  - 'services/*'
+  
+  # Shared packages (if any)
+  - 'packages/*'
+  
+  # Test utilities
+  - 'tests/simulators/*'
+
