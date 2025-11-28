@@ -13,7 +13,9 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 5. [Data Governance](#5️⃣-data-governance)
 6. [Composable Architecture](#6️⃣-composable-architecture)
 7. [Protocol Gateway: Why Custom Go](#7️⃣-protocol-gateway-why-custom-go-instead-of-emqx-neuron)
-8. [Summary of Decisions](#summary-of-recommendations)
+8. [Protocol Gateway: Code Architecture](#8️⃣-protocol-gateway-code-architecture)
+9. [Scaling: 1000+ or 10000+ Devices](#9️⃣-scaling-1000-or-10000-devices)
+10. [Summary of Decisions](#summary-of-recommendations)
 
 ---
 
@@ -80,8 +82,8 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 Devices ──────────  │  ┌─────────┐ ┌─────────┐ ┌─────────┐        │
   (S7, OPC UA,      │  │  gos7   │ │ gopcua  │ │go-modbus│        │
    Modbus, etc.)    │  └────┬────┘ └────┬────┘ └────┬────┘        │
-                    │       └──────────┼───────────┘              │
-                    │                  ▼                          │
+                    │       └───────────┼───────────┘             │
+                    │                   ▼                         │
                     │       ┌──────────────────────┐              │
                     │       │  Device Manager      │              │
                     │       │  Tag Registry        │              │
@@ -734,6 +736,353 @@ Given Neuron's licensing constraints, we will implement a **custom Go Protocol G
 
 ---
 
+## 8️⃣ Protocol Gateway: Code Architecture
+
+**Question:** The Protocol Gateway has many files - won't this slow down the application? Does every device need a separate container? Why not one Dockerfile per protocol?
+
+**Answer:** These are common misconceptions. Here's the clarification:
+
+### Many Files ≠ Slower Performance
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      GO COMPILATION MODEL                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   SOURCE FILES (Development)              BINARY (Runtime)                  │
+│   ─────────────────────────              ─────────────────                  │
+│                                                                             │
+│   ├── cmd/gateway/main.go                                                   │
+│   ├── internal/adapter/modbus/   ════════════════════╗                      │
+│   │   ├── client.go              ║                   ║                      │
+│   │   └── pool.go                ║   COMPILES TO     ║                      │
+│   ├── internal/adapter/mqtt/     ║                   ▼                      │
+│   │   └── publisher.go           ║     ┌───────────────────────┐            │
+│   ├── internal/domain/           ║     │  protocol-gateway     │            │
+│   │   ├── device.go              ║     │  (Single Binary)      │            │
+│   │   ├── tag.go                 ║     │  ~15-20 MB            │            │
+│   │   └── datapoint.go           ║     │  Zero Dependencies    │            │
+│   ├── internal/service/          ║     └───────────────────────┘            │
+│   │   └── polling.go             ║                                          │
+│   └── ...                        ╚════════════════════════════════╝         │
+│                                                                             │
+│   Files are for DEVELOPER ORGANIZATION only.                                │
+│   At runtime: ONE binary, NO file loading, NO performance impact.           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Concern | Reality |
+|---------|---------|
+| Many `.go` files | Go compiles **everything into a single binary** |
+| Runtime impact | **Zero** - there's no file loading at runtime |
+| Binary size | ~15-20 MB total (very small) |
+| Startup time | Milliseconds |
+
+### One Container, Many Devices
+
+**The architecture does NOT spin up a container per device.** One Protocol Gateway container handles ALL devices:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ONE PROTOCOL GATEWAY CONTAINER                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐     │
+│   │              CONNECTION POOL (Max 100 connections by default)     │     │
+│   │                                                                   │     │
+│   │   ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────┐     │     │
+│   │   │Device 1 │  │Device 2 │  │Device 3 │  │Device 4 │  │ ... │     │     │
+│   │   │ Conn    │  │ Conn    │  │ Conn    │  │ Conn    │  │     │     │     │
+│   │   │192.168. │  │192.168. │  │192.168. │  │192.168. │  │     │     │     │
+│   │   │1.100    │  │1.101    │  │1.102    │  │1.103    │  │     │     │     │
+│   │   └─────────┘  └─────────┘  └─────────┘  └─────────┘  └─────┘     │     │
+│   └───────────────────────────────────────────────────────────────────┘     │
+│                                     │                                       │
+│   ┌───────────────────────────────────────────────────────────────────┐     │
+│   │              WORKER POOL (10 concurrent pollers)                  │     │
+│   │   Worker 1  Worker 2  Worker 3  Worker 4  ... Worker 10           │     │
+│   └───────────────────────────────────────────────────────────────────┘     │
+│                                     │                                       │
+│                            ONE MQTT CONNECTION                              │
+│                                     │                                       │
+│                                     ▼                                       │
+│                              EMQX Broker                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+    To add devices: Edit devices.yaml → Restart (or hot-reload in future)
+    NO new containers needed!
+```
+
+### One Dockerfile for All Protocols
+
+There is only **ONE Dockerfile** for the entire Protocol Gateway. All protocols compile into the same binary:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      MULTI-PROTOCOL SINGLE BINARY                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   services/protocol-gateway/                                                │
+│   ├── internal/adapter/                                                     │
+│   │   ├── modbus/          ← Modbus driver (implemented)                    │
+│   │   ├── opcua/           ← OPC UA driver (future)                         │
+│   │   ├── s7/              ← Siemens S7 driver (future)                     │
+│   │   └── mqtt-bridge/     ← MQTT bridge (future)                           │
+│   └── Dockerfile           ← ONE Dockerfile for ALL                         │
+│                                                                             │
+│   devices.yaml determines which driver to use:                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │  devices:                                                           │   │
+│   │    - id: plc-001                                                    │   │
+│   │      protocol: modbus-tcp    # Uses Modbus driver                   │   │
+│   │                                                                     │   │
+│   │    - id: plc-002                                                    │   │
+│   │      protocol: opcua         # Uses OPC UA driver (future)          │   │
+│   │                                                                     │   │
+│   │    - id: plc-003                                                    │   │
+│   │      protocol: s7            # Uses S7 driver (future)              │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| Many files = slow? | ❌ No - compiles to single binary |
+| Container per device? | ❌ No - ONE container, many devices |
+| Container per protocol? | ❌ No - ONE container, all protocols |
+
+---
+
+## 9️⃣ Scaling: 1000+ or 10000+ Devices
+
+**Question:** What happens with 1000+ or 10,000+ devices? Do we spin up a new connection pool?
+
+**Answer:** **Horizontal scaling with multiple gateway instances**, not bigger connection pools.
+
+### Scaling Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      DEVICE SCALING ARCHITECTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  SMALL DEPLOYMENT (< 100 devices)                                           │
+│  ─────────────────────────────────                                          │
+│                                                                             │
+│    ┌─────────────────────────────────────────┐                              │
+│    │       Protocol Gateway Instance 1       │                              │
+│    │       (100 devices, 5000 tags)          │                              │
+│    │       Pool: 100 connections             │                              │
+│    └───────────────────┬─────────────────────┘                              │
+│                        │                                                    │
+│                        ▼                                                    │
+│                  EMQX Broker                                                │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  MEDIUM DEPLOYMENT (100-500 devices)                                        │
+│  ───────────────────────────────────                                        │
+│                                                                             │
+│    ┌──────────────────────────┐   ┌──────────────────────────┐              │
+│    │   Gateway Instance 1     │   │   Gateway Instance 2     │              │
+│    │   (Devices 1-250)        │   │   (Devices 251-500)      │              │
+│    │   Plant A, Lines 1-3     │   │   Plant A, Lines 4-6     │              │
+│    └─────────────┬────────────┘   └─────────────┬────────────┘              │
+│                  │                              │                           │
+│                  └──────────┬───────────────────┘                           │
+│                             ▼                                               │
+│                       EMQX Broker                                           │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  LARGE DEPLOYMENT (1000+ devices)                                           │
+│  ────────────────────────────────                                           │
+│                                                                             │
+│    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────┐          │
+│    │ Gateway 1   │ │ Gateway 2   │ │ Gateway 3   │ │ Gateway 4   │          │
+│    │ Plant A     │ │ Plant B     │ │ Plant C     │ │ Plant D     │          │
+│    │ 250 devices │ │ 250 devices │ │ 250 devices │ │ 250 devices │          │
+│    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘ └──────┬──────┘          │
+│           │               │               │               │                 │
+│           └───────────────┴───────────────┴───────────────┘                 │
+│                                   │                                         │
+│                                   ▼                                         │
+│                          EMQX Broker Cluster                                │
+│                    (3-5 nodes for HA and scale)                             │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ENTERPRISE DEPLOYMENT (10,000+ devices)                                    │
+│  ────────────────────────────────────────                                   │
+│                                                                             │
+│   ┌─── Region 1 ───┐   ┌─── Region 2 ───┐   ┌─── Region 3 ───┐              │
+│   │ ┌───────────┐  │   │ ┌───────────┐  │   │ ┌───────────┐  │              │
+│   │ │Gateway x10│  │   │ │Gateway x10│  │   │ │Gateway x10│  │              │
+│   │ │2500 dev   │  │   │ │2500 dev   │  │   │ │2500 dev   │  │              │
+│   │ └─────┬─────┘  │   │ └─────┬─────┘  │   │ └─────┬─────┘  │              │
+│   │       │        │   │       │        │   │       │        │              │
+│   │ ┌─────▼─────┐  │   │ ┌─────▼─────┐  │   │ ┌─────▼─────┐  │              │
+│   │ │EMQX Local │  │   │ │EMQX Local │  │   │ │EMQX Local │  │              │
+│   │ │ Cluster   │  │   │ │ Cluster   │  │   │ │ Cluster   │  │              │
+│   │ └─────┬─────┘  │   │ └─────┬─────┘  │   │ └─────┬─────┘  │              │
+│   └───────┼────────┘   └───────┼────────┘   └───────┼────────┘              │
+│           │                    │                    │                       │
+│           └────────────────────┴────────────────────┘                       │
+│                                │                                            │
+│                    ┌───────────▼───────────┐                                │
+│                    │  Central EMQX Cloud   │                                │
+│                    │  or Bridge            │                                │
+│                    └───────────────────────┘                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Horizontal Scaling, Not Bigger Pools?
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                WHY HORIZONTAL > VERTICAL SCALING                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ❌ VERTICAL (One Giant Gateway)              ✅ HORIZONTAL (Multiple)     │
+│  ─────────────────────────────────            ─────────────────────────     │
+│                                                                             │
+│  ┌─────────────────────────────┐              ┌─────────┐  ┌─────────┐      │
+│  │   Gateway (10,000 devices)  │              │Gateway 1│  │Gateway 2│      │
+│  │   Pool: 10,000 connections  │              │ 100 dev │  │ 100 dev │      │
+│  │                             │              └────┬────┘  └────┬────┘      │
+│  │   Problems:                 │                   │            │           │
+│  │   • Single point of failure │              ┌─────────┐  ┌─────────┐      │
+│  │   • One crash = ALL down    │              │Gateway 3│  │Gateway N│      │
+│  │   • Memory pressure         │              │ 100 dev │  │ 100 dev │      │
+│  │   • Can't update without    │              └─────────┘  └─────────┘      │
+│  │     total downtime          │                                            │
+│  │   • Network bottleneck      │              Benefits:                     │
+│  └─────────────────────────────┘              • Fault isolation             │
+│                                               • Rolling updates             │
+│                                               • Geographic distribution     │
+│                                               • Independent scaling         │
+│                                               • No single point of failure  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Scaling Guidelines
+
+| Device Count | Recommended Setup | Notes |
+|--------------|-------------------|-------|
+| **1-100** | 1 Gateway instance | Single instance sufficient |
+| **100-500** | 2-5 Gateway instances | Split by plant/area |
+| **500-2000** | 5-20 instances + EMQX cluster | Add EMQX clustering |
+| **2000-10000** | 20-100 instances, regional | Regional EMQX clusters |
+| **10000+** | Federated architecture | Multiple regions, EMQX bridge |
+
+### How to Partition Devices Across Gateways
+
+```yaml
+# Gateway Instance 1 (devices-plant-a.yaml)
+devices:
+  - id: plc-a-001
+    uns_prefix: plant-a/line-1/plc-001
+    connection:
+      host: 192.168.1.100
+  - id: plc-a-002
+    uns_prefix: plant-a/line-1/plc-002
+    connection:
+      host: 192.168.1.101
+  # ... 100 devices for Plant A
+
+# Gateway Instance 2 (devices-plant-b.yaml)  
+devices:
+  - id: plc-b-001
+    uns_prefix: plant-b/line-1/plc-001
+    connection:
+      host: 192.168.2.100
+  # ... 100 devices for Plant B
+```
+
+### Kubernetes Deployment Example (1000+ devices)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: protocol-gateway-plant-a
+spec:
+  replicas: 4  # 4 instances for Plant A
+  selector:
+    matchLabels:
+      app: protocol-gateway
+      plant: plant-a
+  template:
+    spec:
+      containers:
+        - name: gateway
+          image: nexus/protocol-gateway:latest
+          env:
+            - name: DEVICES_CONFIG_PATH
+              value: /config/devices-plant-a.yaml
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+# Repeat for plant-b, plant-c, etc.
+```
+
+### Connection Pool Limits: Why 100?
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CONNECTION POOL SIZING                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Per Gateway Instance (default 100 connections):                            │
+│                                                                             │
+│  • Memory per connection: ~50KB (TCP buffers, state)                        │
+│  • 100 connections = ~5MB memory overhead                                   │
+│  • 1000 connections = ~50MB memory overhead (still manageable)              │
+│                                                                             │
+│  The 100 limit is CONFIGURABLE:                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  modbus:                                                             │   │
+│  │    max_connections: 100    # Default                                 │   │
+│  │    max_connections: 250    # For larger instances                    │   │
+│  │    max_connections: 500    # Maximum recommended per instance        │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Beyond 500 connections per instance: Consider horizontal scaling instead.  │
+│                                                                             │
+│  Why not 10,000 in one pool?                                                │
+│  • Diminishing returns on connection reuse                                  │
+│  • Higher blast radius on failure                                           │
+│  • Harder to debug/monitor                                                  │
+│  • Network interface limits                                                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Summary
+
+| Scale | Strategy |
+|-------|----------|
+| **1-100 devices** | Single gateway, single pool |
+| **100-1000 devices** | Multiple gateways, partitioned by location |
+| **1000-10000 devices** | Regional gateway clusters + EMQX clusters |
+| **10000+ devices** | Federated multi-region architecture |
+
+**Key Principle**: Scale OUT (more instances), not UP (bigger pools). This provides fault isolation, rolling updates, and geographic distribution.
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -745,6 +1094,8 @@ Given Neuron's licensing constraints, we will implement a **custom Go Protocol G
 | **Data Governance** | Quality codes, lineage tracking, retention policies, audit logs, data catalog |
 | **Composable** | Already composable via microservices, MQTT events, containerization, plugin architecture |
 | **EMQX Neuron** | **Rejected** - Free version limited to 30 tags/30 connections (unusable for production) |
+| **Code Architecture** | Many files = single binary. One container handles ALL devices and protocols |
+| **1000+ Devices** | Horizontal scaling - multiple gateway instances, NOT bigger pools |
 
 ---
 

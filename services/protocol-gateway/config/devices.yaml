@@ -1,0 +1,222 @@
+# Device Configurations
+# This file defines all devices and their tags for the Protocol Gateway
+
+version: "1.0"
+
+devices:
+  # Example: Modbus TCP PLC
+  - id: modbus-plc-001
+    name: Production Line 1 - Main PLC
+    description: Main production line controller
+    protocol: modbus-tcp
+    enabled: true
+    uns_prefix: plant1/line1/plc001
+    
+    connection:
+      host: 192.168.1.100
+      port: 502
+      slave_id: 1
+      timeout: 5s
+      retry_count: 3
+      retry_delay: 100ms
+    
+    tags:
+      # Temperature sensor
+      - id: temp_tank1
+        name: Tank 1 Temperature
+        description: Primary tank temperature sensor
+        address: 0          # Holding register 40001
+        register_type: holding_register
+        data_type: float32
+        byte_order: big_endian
+        register_count: 2
+        scale_factor: 0.1
+        offset: 0
+        unit: "°C"
+        topic_suffix: temperature/tank1
+        poll_interval: 1s
+        deadband_type: absolute
+        deadband_value: 0.5
+        enabled: true
+        metadata:
+          sensor_type: PT100
+          location: Tank 1 Top
+
+      # Pressure sensor
+      - id: pressure_tank1
+        name: Tank 1 Pressure
+        description: Primary tank pressure sensor
+        address: 2          # Holding register 40003
+        register_type: holding_register
+        data_type: float32
+        byte_order: big_endian
+        register_count: 2
+        scale_factor: 0.01
+        offset: 0
+        unit: bar
+        topic_suffix: pressure/tank1
+        poll_interval: 500ms
+        deadband_type: percent
+        deadband_value: 1.0
+        enabled: true
+
+      # Flow rate
+      - id: flow_inlet
+        name: Inlet Flow Rate
+        description: Inlet pipe flow measurement
+        address: 4          # Holding register 40005
+        register_type: holding_register
+        data_type: uint16
+        byte_order: big_endian
+        register_count: 1
+        scale_factor: 0.1
+        offset: 0
+        unit: L/min
+        topic_suffix: flow/inlet
+        poll_interval: 1s
+        enabled: true
+
+      # Motor speed
+      - id: motor_speed
+        name: Mixer Motor Speed
+        description: Mixer motor RPM
+        address: 5          # Holding register 40006
+        register_type: holding_register
+        data_type: uint16
+        byte_order: big_endian
+        register_count: 1
+        scale_factor: 1.0
+        offset: 0
+        unit: RPM
+        topic_suffix: motor/speed
+        poll_interval: 2s
+        enabled: true
+
+      # Valve status (bit field)
+      - id: valve_inlet
+        name: Inlet Valve Status
+        description: Inlet valve open/closed status
+        address: 10         # Holding register 40011
+        register_type: holding_register
+        data_type: bool
+        bit_position: 0
+        register_count: 1
+        topic_suffix: valve/inlet/status
+        poll_interval: 1s
+        enabled: true
+
+      # Coil status
+      - id: pump_running
+        name: Pump Running Status
+        description: Main pump running status
+        address: 0          # Coil 1
+        register_type: coil
+        data_type: bool
+        register_count: 1
+        topic_suffix: pump/running
+        poll_interval: 1s
+        enabled: true
+
+      # Energy meter
+      - id: energy_total
+        name: Total Energy Consumption
+        description: Cumulative energy consumption
+        address: 100        # Holding register 40101
+        register_type: holding_register
+        data_type: uint32
+        byte_order: big_endian
+        register_count: 2
+        scale_factor: 0.001
+        offset: 0
+        unit: kWh
+        topic_suffix: energy/total
+        poll_interval: 10s
+        enabled: true
+
+  # Example: Second Modbus device with different byte order
+  - id: modbus-sensor-001
+    name: Environmental Sensor Hub
+    description: Environmental monitoring sensors
+    protocol: modbus-tcp
+    enabled: true
+    uns_prefix: plant1/environment/hub001
+    
+    connection:
+      host: 192.168.1.101
+      port: 502
+      slave_id: 1
+      timeout: 3s
+      retry_count: 2
+      retry_delay: 200ms
+    
+    tags:
+      - id: ambient_temp
+        name: Ambient Temperature
+        description: Room temperature
+        address: 0
+        register_type: input_register
+        data_type: int16
+        byte_order: big_endian
+        register_count: 1
+        scale_factor: 0.1
+        offset: 0
+        unit: "°C"
+        topic_suffix: temperature/ambient
+        poll_interval: 5s
+        enabled: true
+
+      - id: humidity
+        name: Relative Humidity
+        description: Room humidity
+        address: 1
+        register_type: input_register
+        data_type: uint16
+        byte_order: big_endian
+        register_count: 1
+        scale_factor: 0.1
+        offset: 0
+        unit: "%RH"
+        topic_suffix: humidity
+        poll_interval: 5s
+        enabled: true
+
+      - id: co2_level
+        name: CO2 Level
+        description: Carbon dioxide concentration
+        address: 2
+        register_type: input_register
+        data_type: uint16
+        byte_order: big_endian
+        register_count: 1
+        scale_factor: 1.0
+        offset: 0
+        unit: ppm
+        topic_suffix: air/co2
+        poll_interval: 10s
+        enabled: true
+
+  # Disabled device example
+  - id: modbus-backup-001
+    name: Backup Controller
+    description: Standby backup controller (disabled)
+    protocol: modbus-tcp
+    enabled: false
+    uns_prefix: plant1/line1/backup
+    
+    connection:
+      host: 192.168.1.102
+      port: 502
+      slave_id: 1
+      timeout: 5s
+      retry_count: 3
+      retry_delay: 100ms
+    
+    tags:
+      - id: status
+        name: Status
+        address: 0
+        register_type: holding_register
+        data_type: uint16
+        topic_suffix: status
+        enabled: true
+
