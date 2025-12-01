@@ -1,5 +1,5 @@
-// Package modbus provides connection pooling for Modbus clients.
-package modbus
+// Package opcua provides connection pooling for OPC UA clients.
+package opcua
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/sony/gobreaker"
 )
 
-// ConnectionPool manages a pool of Modbus client connections.
+// ConnectionPool manages a pool of OPC UA client connections.
 type ConnectionPool struct {
 	config         PoolConfig
 	clients        map[string]*pooledClient
@@ -56,18 +56,30 @@ type PoolConfig struct {
 
 	// CircuitBreakerName is the name for the circuit breaker
 	CircuitBreakerName string
+
+	// DefaultSecurityPolicy is the default security policy
+	DefaultSecurityPolicy string
+
+	// DefaultSecurityMode is the default security mode
+	DefaultSecurityMode string
+
+	// DefaultAuthMode is the default authentication mode
+	DefaultAuthMode string
 }
 
 // DefaultPoolConfig returns a PoolConfig with sensible defaults.
 func DefaultPoolConfig() PoolConfig {
 	return PoolConfig{
-		MaxConnections:     100,
-		IdleTimeout:        5 * time.Minute,
-		HealthCheckPeriod:  30 * time.Second,
-		ConnectionTimeout:  10 * time.Second,
-		RetryAttempts:      3,
-		RetryDelay:         100 * time.Millisecond,
-		CircuitBreakerName: "modbus-pool",
+		MaxConnections:        50,
+		IdleTimeout:           5 * time.Minute,
+		HealthCheckPeriod:     30 * time.Second,
+		ConnectionTimeout:     15 * time.Second,
+		RetryAttempts:         3,
+		RetryDelay:            500 * time.Millisecond,
+		CircuitBreakerName:    "opcua-pool",
+		DefaultSecurityPolicy: "None",
+		DefaultSecurityMode:   "None",
+		DefaultAuthMode:       "Anonymous",
 	}
 }
 
@@ -75,7 +87,7 @@ func DefaultPoolConfig() PoolConfig {
 func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *metrics.Registry) *ConnectionPool {
 	// Apply defaults
 	if config.MaxConnections == 0 {
-		config.MaxConnections = 100
+		config.MaxConnections = 50
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
@@ -84,7 +96,7 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 		config.HealthCheckPeriod = 30 * time.Second
 	}
 	if config.ConnectionTimeout == 0 {
-		config.ConnectionTimeout = 10 * time.Second
+		config.ConnectionTimeout = 15 * time.Second
 	}
 
 	// Create circuit breaker
@@ -92,10 +104,10 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 		Name:        config.CircuitBreakerName,
 		MaxRequests: 3,
 		Interval:    10 * time.Second,
-		Timeout:     30 * time.Second,
+		Timeout:     60 * time.Second, // OPC UA connections may take longer
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 10 && failureRatio >= 0.6
+			return counts.Requests >= 5 && failureRatio >= 0.6
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
 			logger.Info().
@@ -109,7 +121,7 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 	pool := &ConnectionPool{
 		config:         config,
 		clients:        make(map[string]*pooledClient),
-		logger:         logger.With().Str("component", "modbus-pool").Logger(),
+		logger:         logger.With().Str("component", "opcua-pool").Logger(),
 		metrics:        metricsReg,
 		circuitBreaker: gobreaker.NewCircuitBreaker(cbSettings),
 	}
@@ -170,34 +182,57 @@ func (p *ConnectionPool) GetClient(ctx context.Context, device *domain.Device) (
 	p.logger.Info().
 		Str("device_id", device.ID).
 		Int("pool_size", len(p.clients)).
-		Msg("Created new Modbus client")
+		Msg("Created new OPC UA client")
 
 	return client, nil
 }
 
-// createClient creates a new Modbus client for the device.
+// createClient creates a new OPC UA client for the device.
 func (p *ConnectionPool) createClient(ctx context.Context, device *domain.Device) (*Client, error) {
-	address := fmt.Sprintf("%s:%d", device.Connection.Host, device.Connection.Port)
+	// Build endpoint URL
+	endpointURL := device.Connection.OPCEndpointURL
+	if endpointURL == "" {
+		endpointURL = fmt.Sprintf("opc.tcp://%s:%d", device.Connection.Host, device.Connection.Port)
+	}
 
 	clientConfig := ClientConfig{
-		Address:     address,
-		SlaveID:     device.Connection.SlaveID,
-		Timeout:     device.Connection.Timeout,
-		IdleTimeout: p.config.IdleTimeout,
-		MaxRetries:  device.Connection.RetryCount,
-		RetryDelay:  device.Connection.RetryDelay,
-		Protocol:    device.Protocol,
+		EndpointURL:    endpointURL,
+		SecurityPolicy: p.config.DefaultSecurityPolicy,
+		SecurityMode:   p.config.DefaultSecurityMode,
+		AuthMode:       p.config.DefaultAuthMode,
+		Timeout:        p.config.ConnectionTimeout,
+		KeepAlive:      30 * time.Second,
+		MaxRetries:     p.config.RetryAttempts,
+		RetryDelay:     p.config.RetryDelay,
+		RequestTimeout: device.Connection.Timeout,
+	}
+
+	// Override with device-specific settings if provided
+	if device.Connection.OPCSecurityPolicy != "" {
+		clientConfig.SecurityPolicy = device.Connection.OPCSecurityPolicy
+	}
+	if device.Connection.OPCSecurityMode != "" {
+		clientConfig.SecurityMode = device.Connection.OPCSecurityMode
+	}
+	if device.Connection.OPCAuthMode != "" {
+		clientConfig.AuthMode = device.Connection.OPCAuthMode
+	}
+	if device.Connection.OPCUsername != "" {
+		clientConfig.Username = device.Connection.OPCUsername
+	}
+	if device.Connection.OPCPassword != "" {
+		clientConfig.Password = device.Connection.OPCPassword
+	}
+	if device.Connection.OPCCertFile != "" {
+		clientConfig.CertificateFile = device.Connection.OPCCertFile
+	}
+	if device.Connection.OPCKeyFile != "" {
+		clientConfig.PrivateKeyFile = device.Connection.OPCKeyFile
 	}
 
 	// Apply defaults
-	if clientConfig.Timeout == 0 {
-		clientConfig.Timeout = 5 * time.Second
-	}
-	if clientConfig.MaxRetries == 0 {
-		clientConfig.MaxRetries = p.config.RetryAttempts
-	}
-	if clientConfig.RetryDelay == 0 {
-		clientConfig.RetryDelay = p.config.RetryDelay
+	if clientConfig.RequestTimeout == 0 {
+		clientConfig.RequestTimeout = 5 * time.Second
 	}
 
 	client, err := NewClient(device.ID, clientConfig, p.logger)
@@ -277,84 +312,36 @@ func (p *ConnectionPool) WriteTag(ctx context.Context, device *domain.Device, ta
 	return nil
 }
 
-// WriteSingleCoil writes a boolean value to a coil at the specified address.
-func (p *ConnectionPool) WriteSingleCoil(ctx context.Context, device *domain.Device, address uint16, value bool) error {
-	_, err := p.circuitBreaker.Execute(func() (interface{}, error) {
+// WriteTags writes multiple values to tags on the device.
+func (p *ConnectionPool) WriteTags(ctx context.Context, device *domain.Device, writes []TagWrite) []error {
+	result, err := p.circuitBreaker.Execute(func() (interface{}, error) {
 		client, err := p.GetClient(ctx, device)
 		if err != nil {
-			return nil, err
+			// Return the same error for all writes
+			errors := make([]error, len(writes))
+			for i := range errors {
+				errors[i] = err
+			}
+			return errors, nil
 		}
-		return nil, client.WriteSingleCoil(ctx, address, value)
+		return client.WriteTags(ctx, writes), nil
 	})
 
 	if err != nil {
+		errors := make([]error, len(writes))
 		if err == gobreaker.ErrOpenState {
-			return domain.ErrCircuitBreakerOpen
+			for i := range errors {
+				errors[i] = domain.ErrCircuitBreakerOpen
+			}
+		} else {
+			for i := range errors {
+				errors[i] = err
+			}
 		}
-		return err
+		return errors
 	}
 
-	return nil
-}
-
-// WriteSingleRegister writes a 16-bit value to a holding register.
-func (p *ConnectionPool) WriteSingleRegister(ctx context.Context, device *domain.Device, address uint16, value uint16) error {
-	_, err := p.circuitBreaker.Execute(func() (interface{}, error) {
-		client, err := p.GetClient(ctx, device)
-		if err != nil {
-			return nil, err
-		}
-		return nil, client.WriteSingleRegister(ctx, address, value)
-	})
-
-	if err != nil {
-		if err == gobreaker.ErrOpenState {
-			return domain.ErrCircuitBreakerOpen
-		}
-		return err
-	}
-
-	return nil
-}
-
-// WriteMultipleRegisters writes multiple 16-bit values to consecutive holding registers.
-func (p *ConnectionPool) WriteMultipleRegisters(ctx context.Context, device *domain.Device, address uint16, values []uint16) error {
-	_, err := p.circuitBreaker.Execute(func() (interface{}, error) {
-		client, err := p.GetClient(ctx, device)
-		if err != nil {
-			return nil, err
-		}
-		return nil, client.WriteMultipleRegisters(ctx, address, values)
-	})
-
-	if err != nil {
-		if err == gobreaker.ErrOpenState {
-			return domain.ErrCircuitBreakerOpen
-		}
-		return err
-	}
-
-	return nil
-}
-
-// WriteMultipleCoils writes multiple boolean values to consecutive coils.
-func (p *ConnectionPool) WriteMultipleCoils(ctx context.Context, device *domain.Device, address uint16, values []bool) error {
-	_, err := p.circuitBreaker.Execute(func() (interface{}, error) {
-		client, err := p.GetClient(ctx, device)
-		if err != nil {
-			return nil, err
-		}
-		return nil, client.WriteMultipleCoils(ctx, address, values)
-	})
-
-	if err != nil {
-		if err == gobreaker.ErrOpenState {
-			return domain.ErrCircuitBreakerOpen
-		}
-		return err
-	}
-
-	return nil
+	return result.([]error)
 }
 
 // RemoveClient removes a client from the pool and closes its connection.

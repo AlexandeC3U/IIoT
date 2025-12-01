@@ -557,6 +557,517 @@ func (c *Client) reconnect(ctx context.Context) {
 	}
 }
 
+// WriteTag writes a value to a tag on the device.
+func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{}) error {
+	startTime := time.Now()
+	defer func() {
+		c.stats.TotalWriteTime.Add(time.Since(startTime).Nanoseconds())
+	}()
+
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		return domain.ErrConnectionClosed
+	}
+
+	// Check if tag is writable
+	if !tag.IsWritable() {
+		return fmt.Errorf("%w: tag %s (register type: %s)", domain.ErrTagNotWritable, tag.ID, tag.RegisterType)
+	}
+
+	var err error
+
+	// Execute write with retry logic
+	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		if attempt > 0 {
+			c.stats.RetryCount.Add(1)
+			delay := c.calculateBackoff(attempt)
+			c.logger.Debug().
+				Int("attempt", attempt).
+				Dur("delay", delay).
+				Msg("Retrying Modbus write")
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		err = c.writeRegister(tag, value)
+		if err == nil {
+			break
+		}
+
+		// Check if error is retryable
+		if !c.isRetryableError(err) {
+			c.stats.ErrorCount.Add(1)
+			return err
+		}
+
+		// Try to reconnect on connection errors
+		if c.isConnectionError(err) {
+			c.logger.Warn().Err(err).Msg("Connection error, attempting reconnect")
+			c.reconnect(ctx)
+		}
+	}
+
+	if err != nil {
+		c.stats.ErrorCount.Add(1)
+		return err
+	}
+
+	c.stats.WriteCount.Add(1)
+	c.logger.Debug().
+		Str("tag", tag.ID).
+		Interface("value", value).
+		Msg("Successfully wrote to Modbus register")
+
+	return nil
+}
+
+// writeRegister performs the actual Modbus write operation.
+func (c *Client) writeRegister(tag *domain.Tag, value interface{}) error {
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	switch tag.RegisterType {
+	case domain.RegisterTypeCoil:
+		return c.writeSingleCoil(client, tag.Address, value)
+	case domain.RegisterTypeHoldingRegister:
+		return c.writeHoldingRegister(client, tag, value)
+	default:
+		return fmt.Errorf("%w: %s is read-only", domain.ErrTagNotWritable, tag.RegisterType)
+	}
+}
+
+// writeSingleCoil writes a boolean value to a coil (function code 0x05).
+func (c *Client) writeSingleCoil(client modbus.Client, address uint16, value interface{}) error {
+	boolValue, ok := c.toBool(value)
+	if !ok {
+		return fmt.Errorf("%w: cannot convert %T to bool for coil", domain.ErrInvalidWriteValue, value)
+	}
+
+	var coilValue uint16
+	if boolValue {
+		coilValue = 0xFF00 // ON
+	} else {
+		coilValue = 0x0000 // OFF
+	}
+
+	_, err := client.WriteSingleCoil(address, coilValue)
+	if err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	return nil
+}
+
+// writeHoldingRegister writes a value to holding register(s).
+func (c *Client) writeHoldingRegister(client modbus.Client, tag *domain.Tag, value interface{}) error {
+	// Convert value to bytes based on data type
+	bytes, err := c.valueToBytes(value, tag)
+	if err != nil {
+		return err
+	}
+
+	// Single register write (function code 0x06)
+	if len(bytes) == 2 {
+		regValue := binary.BigEndian.Uint16(bytes)
+		_, err := client.WriteSingleRegister(tag.Address, regValue)
+		if err != nil {
+			return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+		}
+		return nil
+	}
+
+	// Multiple register write (function code 0x10)
+	quantity := uint16(len(bytes) / 2)
+	_, err = client.WriteMultipleRegisters(tag.Address, quantity, bytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	return nil
+}
+
+// WriteSingleCoil writes a boolean value to a coil at the specified address.
+func (c *Client) WriteSingleCoil(ctx context.Context, address uint16, value bool) error {
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		return domain.ErrConnectionClosed
+	}
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	var coilValue uint16
+	if value {
+		coilValue = 0xFF00
+	}
+
+	_, err := client.WriteSingleCoil(address, coilValue)
+	if err != nil {
+		c.stats.ErrorCount.Add(1)
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	c.stats.WriteCount.Add(1)
+	return nil
+}
+
+// WriteSingleRegister writes a 16-bit value to a holding register.
+func (c *Client) WriteSingleRegister(ctx context.Context, address uint16, value uint16) error {
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		return domain.ErrConnectionClosed
+	}
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	_, err := client.WriteSingleRegister(address, value)
+	if err != nil {
+		c.stats.ErrorCount.Add(1)
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	c.stats.WriteCount.Add(1)
+	return nil
+}
+
+// WriteMultipleRegisters writes multiple 16-bit values to consecutive holding registers.
+func (c *Client) WriteMultipleRegisters(ctx context.Context, address uint16, values []uint16) error {
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		return domain.ErrConnectionClosed
+	}
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	// Convert to bytes
+	bytes := make([]byte, len(values)*2)
+	for i, v := range values {
+		binary.BigEndian.PutUint16(bytes[i*2:], v)
+	}
+
+	_, err := client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
+	if err != nil {
+		c.stats.ErrorCount.Add(1)
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	c.stats.WriteCount.Add(1)
+	return nil
+}
+
+// WriteMultipleCoils writes multiple boolean values to consecutive coils.
+func (c *Client) WriteMultipleCoils(ctx context.Context, address uint16, values []bool) error {
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		return domain.ErrConnectionClosed
+	}
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	// Pack bools into bytes
+	byteCount := (len(values) + 7) / 8
+	bytes := make([]byte, byteCount)
+	for i, v := range values {
+		if v {
+			bytes[i/8] |= 1 << (i % 8)
+		}
+	}
+
+	_, err := client.WriteMultipleCoils(address, uint16(len(values)), bytes)
+	if err != nil {
+		c.stats.ErrorCount.Add(1)
+		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
+	}
+
+	c.stats.WriteCount.Add(1)
+	return nil
+}
+
+// valueToBytes converts a value to bytes based on the tag's data type.
+func (c *Client) valueToBytes(value interface{}, tag *domain.Tag) ([]byte, error) {
+	// Reverse scaling if applied
+	actualValue := c.reverseScaling(value, tag)
+
+	var bytes []byte
+
+	switch tag.DataType {
+	case domain.DataTypeBool:
+		bytes = make([]byte, 2)
+		if b, ok := c.toBool(actualValue); ok && b {
+			binary.BigEndian.PutUint16(bytes, 1)
+		}
+
+	case domain.DataTypeInt16:
+		bytes = make([]byte, 2)
+		if v, ok := c.toInt64(actualValue); ok {
+			binary.BigEndian.PutUint16(bytes, uint16(int16(v)))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to int16", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeUInt16:
+		bytes = make([]byte, 2)
+		if v, ok := c.toInt64(actualValue); ok {
+			binary.BigEndian.PutUint16(bytes, uint16(v))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to uint16", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeInt32:
+		bytes = make([]byte, 4)
+		if v, ok := c.toInt64(actualValue); ok {
+			binary.BigEndian.PutUint32(bytes, uint32(int32(v)))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to int32", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeUInt32:
+		bytes = make([]byte, 4)
+		if v, ok := c.toInt64(actualValue); ok {
+			binary.BigEndian.PutUint32(bytes, uint32(v))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to uint32", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeInt64:
+		bytes = make([]byte, 8)
+		if v, ok := c.toInt64(actualValue); ok {
+			binary.BigEndian.PutUint64(bytes, uint64(v))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to int64", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeUInt64:
+		bytes = make([]byte, 8)
+		if v, ok := c.toUint64(actualValue); ok {
+			binary.BigEndian.PutUint64(bytes, v)
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to uint64", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeFloat32:
+		bytes = make([]byte, 4)
+		if v, ok := c.toFloat64(actualValue); ok {
+			binary.BigEndian.PutUint32(bytes, math.Float32bits(float32(v)))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to float32", domain.ErrInvalidWriteValue, value)
+		}
+
+	case domain.DataTypeFloat64:
+		bytes = make([]byte, 8)
+		if v, ok := c.toFloat64(actualValue); ok {
+			binary.BigEndian.PutUint64(bytes, math.Float64bits(v))
+		} else {
+			return nil, fmt.Errorf("%w: cannot convert %T to float64", domain.ErrInvalidWriteValue, value)
+		}
+
+	default:
+		return nil, fmt.Errorf("%w: unsupported data type %s", domain.ErrInvalidDataType, tag.DataType)
+	}
+
+	// Apply byte order transformation
+	bytes = c.reorderBytesForWrite(bytes, tag.ByteOrder)
+
+	return bytes, nil
+}
+
+// reverseScaling reverses the scaling for write operations.
+func (c *Client) reverseScaling(value interface{}, tag *domain.Tag) interface{} {
+	if tag.ScaleFactor == 1.0 && tag.Offset == 0 {
+		return value
+	}
+
+	floatVal, ok := c.toFloat64(value)
+	if !ok {
+		return value
+	}
+
+	return (floatVal - tag.Offset) / tag.ScaleFactor
+}
+
+// reorderBytesForWrite reorders bytes for write operations (inverse of read).
+func (c *Client) reorderBytesForWrite(data []byte, order domain.ByteOrder) []byte {
+	// The byte reordering for writes is the same as reads - just apply the same transformation
+	return c.reorderBytes(data, order)
+}
+
+// toBool converts a value to bool.
+func (c *Client) toBool(v interface{}) (bool, bool) {
+	switch val := v.(type) {
+	case bool:
+		return val, true
+	case int:
+		return val != 0, true
+	case int8:
+		return val != 0, true
+	case int16:
+		return val != 0, true
+	case int32:
+		return val != 0, true
+	case int64:
+		return val != 0, true
+	case uint:
+		return val != 0, true
+	case uint8:
+		return val != 0, true
+	case uint16:
+		return val != 0, true
+	case uint32:
+		return val != 0, true
+	case uint64:
+		return val != 0, true
+	case float32:
+		return val != 0, true
+	case float64:
+		return val != 0, true
+	default:
+		return false, false
+	}
+}
+
+// toInt64 converts a value to int64.
+func (c *Client) toInt64(v interface{}) (int64, bool) {
+	switch val := v.(type) {
+	case int:
+		return int64(val), true
+	case int8:
+		return int64(val), true
+	case int16:
+		return int64(val), true
+	case int32:
+		return int64(val), true
+	case int64:
+		return val, true
+	case uint:
+		return int64(val), true
+	case uint8:
+		return int64(val), true
+	case uint16:
+		return int64(val), true
+	case uint32:
+		return int64(val), true
+	case uint64:
+		return int64(val), true
+	case float32:
+		return int64(val), true
+	case float64:
+		return int64(val), true
+	default:
+		return 0, false
+	}
+}
+
+// toUint64 converts a value to uint64.
+func (c *Client) toUint64(v interface{}) (uint64, bool) {
+	switch val := v.(type) {
+	case int:
+		return uint64(val), true
+	case int8:
+		return uint64(val), true
+	case int16:
+		return uint64(val), true
+	case int32:
+		return uint64(val), true
+	case int64:
+		return uint64(val), true
+	case uint:
+		return uint64(val), true
+	case uint8:
+		return uint64(val), true
+	case uint16:
+		return uint64(val), true
+	case uint32:
+		return uint64(val), true
+	case uint64:
+		return val, true
+	case float32:
+		return uint64(val), true
+	case float64:
+		return uint64(val), true
+	default:
+		return 0, false
+	}
+}
+
+// toFloat64 converts a value to float64.
+func (c *Client) toFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case int:
+		return float64(val), true
+	case int8:
+		return float64(val), true
+	case int16:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case uint:
+		return float64(val), true
+	case uint8:
+		return float64(val), true
+	case uint16:
+		return float64(val), true
+	case uint32:
+		return float64(val), true
+	case uint64:
+		return float64(val), true
+	case float32:
+		return float64(val), true
+	case float64:
+		return val, true
+	default:
+		return 0, false
+	}
+}
+
 // GetStats returns the client statistics.
 func (c *Client) GetStats() ClientStats {
 	return ClientStats{

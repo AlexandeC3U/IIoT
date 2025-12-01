@@ -15,7 +15,8 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 7. [Protocol Gateway: Why Custom Go](#7️⃣-protocol-gateway-why-custom-go-instead-of-emqx-neuron)
 8. [Protocol Gateway: Code Architecture](#8️⃣-protocol-gateway-code-architecture)
 9. [Scaling: 1000+ or 10000+ Devices](#9️⃣-scaling-1000-or-10000-devices)
-10. [Summary of Decisions](#summary-of-recommendations)
+10. [Device/Tag Configuration: Frontend → Database → Protocol Gateway](#🔟-devicetag-configuration-frontend--database--protocol-gateway)
+11. [Summary of Decisions](#summary-of-recommendations)
 
 ---
 
@@ -1083,6 +1084,216 @@ spec:
 
 ---
 
+## 🔟 Device/Tag Configuration: Frontend → Database → Protocol Gateway
+
+**Question:** When adding a device/tag via the frontend application, this will save it in the database I suppose, and the protocol-gateway will and can handle this?
+
+**Answer:** **Yes, this was the intended flow from the start.** The architecture is designed for database-driven configuration, with the Protocol Gateway dynamically loading devices from PostgreSQL.
+
+### Intended Workflow (From Original Design)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    DEVICE/TAG CONFIGURATION FLOW                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. USER ACTION (Frontend)                                                  │
+│     ┌─────────────────────────────────────────────────────────────┐         │
+│     │  React UI: "Add Device" form                                │         │
+│     │  • Name: "PLC-001"                                          │         │
+│     │  • Protocol: Modbus TCP                                     │         │
+│     │  • IP: 192.168.1.100                                        │         │
+│     │  • Tags: [Temperature, Pressure, ...]                       │         │
+│     └──────────────────────┬──────────────────────────────────────┘         │
+│                            │ HTTP POST /api/devices                         │
+│                            ▼                                                │
+│  2. API GATEWAY (Gateway Core Service)                                      │
+│     ┌─────────────────────────────────────────────────────────────┐         │
+│     │  • Validate configuration                                   │         │
+│     │  • Store in PostgreSQL (devices + device_tags tables)       │         │
+│     │  • Generate UUID for device                                 │         │
+│     │  • Notify Protocol Gateway via MQTT                         │         │
+│     │  • Return device ID to frontend                             │         │
+│     └──────────────────────┬──────────────────────────────────────┘         │
+│                            │                                                │
+│                            ▼                                                │
+│  3. DATABASE (PostgreSQL)                                                   │
+│     ┌─────────────────────────────────────────────────────────────┐         │
+│     │  INSERT INTO devices (...)                                  │         │
+│     │  INSERT INTO device_tags (...)                              │         │
+│     └──────────────────────┬──────────────────────────────────────┘         │
+│                            │                                                │
+│                            ▼                                                │
+│  4. PROTOCOL GATEWAY (Dynamic Configuration)                                │
+│     ┌─────────────────────────────────────────────────────────────┐         │
+│     │  Option A: MQTT Notification (Recommended)                  │         │
+│     │    • Subscribe to: $nexus/config/devices/+/updated          │         │
+│     │    • On message: Query PostgreSQL for device config         │         │
+│     │    • Add/Update/Remove device from polling                  │         │
+│     │                                                             │         │
+│     │  Option B: Database Polling (Fallback)                      │         │
+│     │    • Poll database every 5-10 seconds                       │         │
+│     │    • Compare with current devices, add/remove as needed     │         │
+│     │                                                             │         │
+│     │  When new device detected:                                  │         │
+│     │  • Load device config from DB                               │         │
+│     │  • Create connection pool entry                             │         │
+│     │  • Start polling tags                                       │         │
+│     └─────────────────────────────────────────────────────────────┘         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Current Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Database Schema** | ✅ **Complete** | `devices` and `device_tags` tables exist in PostgreSQL |
+| **API Gateway Endpoints** | ✅ **Designed** | `/api/devices` endpoints defined in architecture |
+| **Frontend UI** | ✅ **Designed** | React forms for device/tag management |
+| **Protocol Gateway DB Adapter** | ⚠️ **Missing** | Currently only loads from YAML files |
+| **Config Sync Mechanism** | ⚠️ **Missing** | No MQTT subscriber or polling implemented yet |
+
+### Why YAML Files Currently?
+
+The Protocol Gateway currently loads devices from YAML files (`config/devices.yaml`) for:
+- **Initial Development**: Quick iteration without database setup
+- **Testing**: Easy to test with static configurations
+- **Bootstrap**: Can still use YAML for initial device setup
+
+**However**, the production architecture always intended database-driven configuration for:
+- Dynamic device addition/removal without restarts
+- Multi-user management via frontend
+- Centralized configuration storage
+- Audit trail and versioning
+
+### Recommended Implementation: MQTT-Based Config Sync
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    MQTT-BASED CONFIGURATION SYNC                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Gateway Core (after DB insert):                                            │
+│    ┌─────────────────────────────────────────────────────────────┐          │
+│    │  Publish to: $nexus/config/devices/+/updated                │          │
+│    │  Payload: {                                                 │          │
+│    │    "device_id": "uuid",                                     │          │
+│    │    "action": "created" | "updated" | "deleted",             │          │
+│    │    "timestamp": "2024-01-15T10:30:00Z"                      │          │
+│    │  }                                                          │          │
+│    └──────────────────────┬──────────────────────────────────────┘          │
+│                           │                                                 │
+│                           ▼                                                 │
+│  EMQX Broker                                                                │
+│                           │                                                 │
+│                           ▼                                                 │
+│  Protocol Gateway (subscribes to config topic):                             │
+│    ┌─────────────────────────────────────────────────────────────┐          │
+│    │  On message:                                                │          │
+│    │  1. Query PostgreSQL for device config                      │          │
+│    │  2. Add/Update/Remove device from polling                   │          │
+│    │  3. Update connection pool                                  │          │
+│    │  4. Log configuration change                                │          │
+│    └─────────────────────────────────────────────────────────────┘          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+- ✅ Real-time updates (no polling delay)
+- ✅ Decoupled services (Gateway Core doesn't need to know Protocol Gateway location)
+- ✅ Works with existing MQTT infrastructure
+- ✅ Scales well (multiple gateway instances can subscribe)
+
+### Alternative: Database Polling (Simpler, Less Efficient)
+
+```go
+// Protocol Gateway polls database every 10 seconds
+ticker := time.NewTicker(10 * time.Second)
+for range ticker.C {
+    devices, err := db.LoadDevices()
+    // Compare with current devices, add/remove as needed
+}
+```
+
+**Benefits:**
+- ✅ Simple to implement
+- ✅ No MQTT dependency for config sync
+- ✅ Works in all scenarios
+
+**Drawbacks:**
+- ⚠️ 5-10 second delay before changes take effect
+- ⚠️ Unnecessary database load
+
+### What Needs to Be Implemented
+
+#### 1. Database Adapter for Protocol Gateway
+
+```go
+// services/protocol-gateway/internal/adapter/database/devices.go
+type DeviceRepository interface {
+    LoadAll() ([]*domain.Device, error)
+    LoadByID(id string) (*domain.Device, error)
+    WatchChanges(ctx context.Context) (<-chan DeviceChange, error)
+}
+```
+
+#### 2. Configuration Manager Service
+
+```go
+// services/protocol-gateway/internal/service/config_manager.go
+type ConfigManager struct {
+    devices map[string]*domain.Device
+    db      DeviceRepository
+    mqtt    MQTTSubscriber
+    polling *PollingService
+}
+
+func (cm *ConfigManager) OnDeviceCreated(deviceID string) {
+    device, _ := cm.db.LoadByID(deviceID)
+    cm.devices[deviceID] = device
+    // Notify polling service to start polling
+    cm.polling.AddDevice(device)
+}
+```
+
+#### 3. MQTT Config Subscriber
+
+```go
+// Subscribe to: $nexus/config/devices/+/updated
+// On message: reload device config from DB
+func (cm *ConfigManager) handleConfigUpdate(msg mqtt.Message) {
+    var event ConfigEvent
+    json.Unmarshal(msg.Payload(), &event)
+    
+    switch event.Action {
+    case "created", "updated":
+        device, _ := cm.db.LoadByID(event.DeviceID)
+        cm.updateDevice(device)
+    case "deleted":
+        cm.removeDevice(event.DeviceID)
+    }
+}
+```
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| **Was this the intended flow?** | ✅ **Yes** - Designed from the start |
+| **Frontend saves to DB?** | ✅ **Yes** - Via Gateway Core API |
+| **Protocol Gateway handles DB config?** | ⚠️ **Not yet** - Currently YAML only, DB adapter needed |
+| **Dynamic updates?** | ⚠️ **Not yet** - Needs MQTT subscriber or polling |
+
+**Next Steps:**
+1. Implement PostgreSQL adapter in Protocol Gateway
+2. Add MQTT config subscriber (recommended) or database polling
+3. Update Gateway Core to publish config change events
+4. Remove YAML dependency (or keep as fallback for bootstrap)
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -1096,6 +1307,7 @@ spec:
 | **EMQX Neuron** | **Rejected** - Free version limited to 30 tags/30 connections (unusable for production) |
 | **Code Architecture** | Many files = single binary. One container handles ALL devices and protocols |
 | **1000+ Devices** | Horizontal scaling - multiple gateway instances, NOT bigger pools |
+| **Device/Tag Config Flow** | Frontend → Gateway Core → PostgreSQL → Protocol Gateway (via MQTT notification) |
 
 ---
 

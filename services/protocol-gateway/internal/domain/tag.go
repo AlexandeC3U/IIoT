@@ -42,7 +42,16 @@ const (
 	ByteOrderMidLitEndian ByteOrder = "mid_little"    // CDAB (byte swap)
 )
 
-// Tag represents a single data point to be read from a device.
+// AccessMode defines read/write access for a tag.
+type AccessMode string
+
+const (
+	AccessModeReadOnly  AccessMode = "read"
+	AccessModeWriteOnly AccessMode = "write"
+	AccessModeReadWrite AccessMode = "readwrite"
+)
+
+// Tag represents a single data point to be read from/written to a device.
 type Tag struct {
 	// ID is the unique identifier for this tag within the device
 	ID string `json:"id" yaml:"id"`
@@ -96,6 +105,15 @@ type Tag struct {
 
 	// Enabled indicates whether this tag should be actively polled
 	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// AccessMode specifies read/write access (read, write, readwrite)
+	AccessMode AccessMode `json:"access_mode,omitempty" yaml:"access_mode,omitempty"`
+
+	// OPCNodeID is the OPC UA node identifier (e.g., "ns=2;s=Temperature" or "ns=2;i=1234")
+	OPCNodeID string `json:"opc_node_id,omitempty" yaml:"opc_node_id,omitempty"`
+
+	// OPCNamespaceIndex is the OPC UA namespace index (if not included in OPCNodeID)
+	OPCNamespaceIndex uint16 `json:"opc_namespace_index,omitempty" yaml:"opc_namespace_index,omitempty"`
 
 	// Metadata contains additional key-value pairs for this tag
 	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
@@ -170,5 +188,39 @@ func (t *Tag) GetEffectivePollInterval(deviceDefault time.Duration) time.Duratio
 		return *t.PollInterval
 	}
 	return deviceDefault
+}
+
+// IsWritable returns true if the tag supports write operations.
+// For Modbus, coils and holding registers are writable.
+// For OPC UA, it depends on the node's access level (use AccessMode).
+func (t *Tag) IsWritable() bool {
+	// Check explicit access mode first
+	if t.AccessMode != "" {
+		return t.AccessMode == AccessModeWriteOnly || t.AccessMode == AccessModeReadWrite
+	}
+
+	// For Modbus, determine writability from register type
+	switch t.RegisterType {
+	case RegisterTypeCoil:
+		return true // Coils are read/write
+	case RegisterTypeHoldingRegister:
+		return true // Holding registers are read/write
+	case RegisterTypeDiscreteInput:
+		return false // Discrete inputs are read-only
+	case RegisterTypeInputRegister:
+		return false // Input registers are read-only
+	default:
+		// For OPC UA and other protocols, assume writable if access mode is set
+		return false
+	}
+}
+
+// IsReadable returns true if the tag supports read operations.
+func (t *Tag) IsReadable() bool {
+	if t.AccessMode != "" {
+		return t.AccessMode == AccessModeReadOnly || t.AccessMode == AccessModeReadWrite
+	}
+	// By default, all tags are readable
+	return true
 }
 

@@ -562,6 +562,46 @@ interface CompoundCondition {
 
 ## Protocol Integration
 
+### Bidirectional Communication
+
+All protocol adapters support **full bidirectional communication** - both reading data from devices AND writing values back to them.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    BIDIRECTIONAL COMMUNICATION ARCHITECTURE                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  READS: Device → Gateway → MQTT Broker → Subscribers                        │
+│  ─────────────────────────────────────────────────                          │
+│    • Modbus: Polling (client-initiated)                                     │
+│    • OPC UA: Polling OR Subscriptions (server pushes changes)               │
+│    • S7: Polling (client-initiated)                                         │
+│                                                                             │
+│  WRITES: Application → MQTT Command → Gateway → Device                      │
+│  ─────────────────────────────────────────────────────                      │
+│    • Subscribe to: $nexus/cmd/{device}/{tag}/set                            │
+│    • Publish response: $nexus/cmd/response/{device}/{tag}                   │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ Protocol │ Read Mechanism     │ Write Mechanism    │ Subscriptions    │  │
+│  ├──────────┼────────────────────┼────────────────────┼──────────────────┤  │
+│  │ Modbus   │ FC01/02/03/04      │ FC05/06/15/16      │ Not in spec      │  │
+│  │ OPC UA   │ ReadRequest        │ WriteRequest       │ MonitoredItems   │  │
+│  │ S7       │ Read DB/Merker     │ Write DB/Merker    │ Not in spec      │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Command Handler Flow:                                                      │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  1. MQTT message received on $nexus/cmd/plc-001/temperature/set       │  │
+│  │  2. Validate device exists and tag is writable                        │  │
+│  │  3. Convert value (apply reverse scaling if configured)               │  │
+│  │  4. Route to protocol-specific writer (Modbus/OPC UA/S7)              │  │
+│  │  5. Publish response to $nexus/cmd/response/plc-001/temperature       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ### Siemens S7 Protocol
 
 ```
@@ -612,15 +652,18 @@ interface CompoundCondition {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         OPC UA PROTOCOL INTEGRATION                         │
+│                  OPC UA PROTOCOL INTEGRATION (Bidirectional)                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  Go Library: github.com/gopcua/opcua (MIT License)                          │
 │                                                                             │
+│  IMPLEMENTED: Full read/write + subscriptions                               │
+│                                                                             │
 │  Features:                                                                  │
 │  ├── Automatic server discovery (LDS)                                       │
 │  ├── Address space browsing                                                 │
-│  ├── Subscription-based monitoring                                          │
+│  ├── Subscription-based monitoring (Report-by-Exception)                    │
+│  ├── WriteRequest for bidirectional control                                 │
 │  ├── Security: None, Sign, SignAndEncrypt                                   │
 │  └── Authentication: Anonymous, Username, Certificate                       │
 │                                                                             │
@@ -657,10 +700,12 @@ interface CompoundCondition {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        MODBUS PROTOCOL INTEGRATION                          │
+│                   MODBUS PROTOCOL INTEGRATION (Bidirectional)               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Go Library: github.com/simonvetter/modbus (MIT License)                    │
+│  Go Library: github.com/goburrow/modbus (BSD License)                       │
+│                                                                             │
+│  IMPLEMENTED: Full read/write support                                       │
 │                                                                             │
 │  Supported Variants:                                                        │
 │  ├── Modbus TCP (port 502)                                                  │

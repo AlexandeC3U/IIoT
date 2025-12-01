@@ -57,6 +57,26 @@ var (
 	ErrMQTTSubscribeFailed  = errors.New("MQTT subscribe failed")
 )
 
+// OPC UA specific errors.
+var (
+	ErrOPCUAInvalidNodeID       = errors.New("opcua: invalid node ID")
+	ErrOPCUASubscriptionFailed  = errors.New("opcua: subscription failed")
+	ErrOPCUABadStatus           = errors.New("opcua: bad status code")
+	ErrOPCUASecurityFailed      = errors.New("opcua: security negotiation failed")
+	ErrOPCUASessionExpired      = errors.New("opcua: session expired")
+	ErrOPCUABrowseFailed        = errors.New("opcua: browse failed")
+	ErrOPCUANodeNotFound        = errors.New("opcua: node not found")
+	ErrOPCUAAccessDenied        = errors.New("opcua: access denied")
+	ErrOPCUAWriteNotPermitted   = errors.New("opcua: write not permitted")
+)
+
+// Write operation errors.
+var (
+	ErrTagNotWritable    = errors.New("tag is not writable")
+	ErrInvalidWriteValue = errors.New("invalid value for write operation")
+	ErrWriteTimeout      = errors.New("write operation timed out")
+)
+
 // Service errors.
 var (
 	ErrServiceNotStarted = errors.New("service not started")

@@ -1,6 +1,71 @@
 # Protocol Gateway Service - Complete Documentation
 
-This document provides a comprehensive overview of all files created for the Protocol Gateway service, a production-grade Go implementation for industrial protocol translation.
+This document provides a comprehensive overview of all files created for the Protocol Gateway service, a production-grade Go implementation for industrial protocol translation with **bidirectional communication** (read AND write support).
+
+---
+
+## 🔄 Bidirectional Communication (NEW)
+
+The Protocol Gateway now supports **writing to devices** in addition to reading. This enables:
+- **Remote setpoint changes** via MQTT commands
+- **Control operations** (start/stop, enable/disable)
+- **Configuration updates** to PLCs and devices
+
+### Write Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        BIDIRECTIONAL COMMUNICATION                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  READ FLOW (Polling):                                                       │
+│  Device ──[Modbus Read]──> Gateway ──[MQTT Publish]──> EMQX ──> Subscribers │
+│                                                                             │
+│  WRITE FLOW (Commands):                                                     │
+│  Publisher ──[MQTT]──> Gateway ──[Modbus Write]──> Device                   │
+│      │                    │                                                 │
+│      │                    ├── Validate tag is writable                      │
+│      │                    ├── Convert value to register format              │
+│      │                    └── Apply reverse scaling                         │
+│      │                                                                      │
+│      ▼                                                                      │
+│  $nexus/cmd/response/{device}/{tag} <── Response published                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### MQTT Command Topics
+
+| Topic Pattern | Purpose | Payload |
+|---------------|---------|---------|
+| `$nexus/cmd/{device}/write` | JSON write command | `{"tag_id": "...", "value": ...}` |
+| `$nexus/cmd/{device}/{tag}/set` | Simple write | `75.5` (raw value) |
+| `$nexus/cmd/response/{device}/{tag}` | Response | `{"success": true, ...}` |
+
+### Writable Register Types
+
+| Register Type | Function Code | Writable |
+|---------------|---------------|----------|
+| Coil | FC01 (read) / **FC05, FC15 (write)** | ✅ Yes |
+| Discrete Input | FC02 | ❌ No |
+| Holding Register | FC03 (read) / **FC06, FC16 (write)** | ✅ Yes |
+| Input Register | FC04 | ❌ No |
+
+### Write Methods Added
+
+```go
+// Single coil write (FC05)
+pool.WriteSingleCoil(ctx, device, address, true)
+
+// Single register write (FC06)
+pool.WriteSingleRegister(ctx, device, address, 1234)
+
+// Multiple registers write (FC16)
+pool.WriteMultipleRegisters(ctx, device, address, []uint16{1, 2, 3})
+
+// High-level tag write (auto-selects function code)
+pool.WriteTag(ctx, device, tag, 75.5)
+```
 
 ---
 
@@ -169,26 +234,39 @@ services/protocol-gateway/
 ---
 
 #### `modbus/client.go`
-**Purpose**: Production-grade Modbus TCP client
+**Purpose**: Production-grade Modbus TCP client with **bidirectional communication**
 
 **What it does**:
 - Establishes TCP connections to Modbus devices
 - Reads all register types (coils, discrete inputs, holding, input)
+- **Writes to coils and holding registers** (NEW)
 - Parses raw bytes into typed values with proper byte ordering
 - Applies scaling and offset transformations
+- **Applies reverse scaling for write operations** (NEW)
 - Implements retry logic with exponential backoff
-- Tracks performance statistics
+- Tracks performance statistics (reads AND writes)
 
 **Key Features**:
 - Thread-safe operations with mutex protection
 - Automatic reconnection on connection loss
 - Configurable timeouts and retry counts
 - Support for all common byte orderings (ABCD, DCBA, BADC, CDAB)
+- **Write support for coils (FC05, FC15) and holding registers (FC06, FC16)** (NEW)
+- **Automatic value-to-bytes conversion** (NEW)
+
+**Write Methods**:
+| Method | Function Code | Description |
+|--------|---------------|-------------|
+| `WriteTag()` | Auto | High-level tag write with validation |
+| `WriteSingleCoil()` | FC05 | Write single coil (bool) |
+| `WriteSingleRegister()` | FC06 | Write single 16-bit register |
+| `WriteMultipleRegisters()` | FC16 | Write consecutive registers |
+| `WriteMultipleCoils()` | FC15 | Write consecutive coils |
 
 ---
 
 #### `modbus/pool.go`
-**Purpose**: Connection pool with circuit breaker
+**Purpose**: Connection pool with circuit breaker and **write support**
 
 **What it does**:
 - Manages a pool of Modbus client connections
@@ -196,6 +274,7 @@ services/protocol-gateway/
 - Implements circuit breaker pattern to prevent cascade failures
 - Performs periodic health checks on all connections
 - Automatically removes idle connections
+- **Routes write operations through circuit breaker** (NEW)
 
 **Key Features**:
 - **Connection Pooling**: Reuses connections across poll cycles
@@ -203,6 +282,7 @@ services/protocol-gateway/
 - **Health Checks**: Periodic connection validation
 - **Idle Reaper**: Closes unused connections after timeout
 - **Thread-Safe**: All operations are protected by mutexes
+- **Write Methods**: WriteTag, WriteSingleCoil, WriteSingleRegister, etc. (NEW)
 
 ---
 
@@ -243,6 +323,35 @@ services/protocol-gateway/
 - **Quality Tracking**: Records good/bad data points
 - **Graceful Shutdown**: Waits for in-flight operations
 - **Statistics**: Tracks polls, errors, points read/published
+
+---
+
+#### `command_handler.go` (NEW)
+**Purpose**: MQTT command handler for write operations
+
+**What it does**:
+- Subscribes to MQTT command topics
+- Parses write commands from JSON or raw values
+- Validates device and tag existence
+- Checks tag writability before execution
+- Routes commands to appropriate protocol driver
+- Publishes response with success/error status
+
+**MQTT Topics**:
+```
+Subscribe:
+  $nexus/cmd/+/write          → JSON: {"tag_id": "...", "value": ...}
+  $nexus/cmd/+/+/set          → Raw value: 75.5
+
+Publish:
+  $nexus/cmd/response/{device}/{tag} → {"success": true, "duration_ms": 45}
+```
+
+**Key Features**:
+- **Request Correlation**: Optional request_id for tracking
+- **Concurrent Writes**: Handles multiple simultaneous commands
+- **Error Reporting**: Detailed error messages in responses
+- **Statistics**: Tracks commands received/succeeded/failed
 
 ---
 

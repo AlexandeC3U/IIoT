@@ -70,11 +70,24 @@ type Device struct {
 
 // ConnectionConfig holds protocol-specific connection parameters.
 type ConnectionConfig struct {
+	// === Common Settings ===
+
 	// Host is the IP address or hostname of the device
 	Host string `json:"host,omitempty" yaml:"host,omitempty"`
 
 	// Port is the TCP port number
 	Port int `json:"port,omitempty" yaml:"port,omitempty"`
+
+	// Timeout is the connection/response timeout
+	Timeout time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
+	// RetryCount is the number of retry attempts on failure
+	RetryCount int `json:"retry_count,omitempty" yaml:"retry_count,omitempty"`
+
+	// RetryDelay is the delay between retry attempts
+	RetryDelay time.Duration `json:"retry_delay,omitempty" yaml:"retry_delay,omitempty"`
+
+	// === Modbus Settings ===
 
 	// SlaveID is the Modbus slave/unit ID (1-247)
 	SlaveID uint8 `json:"slave_id,omitempty" yaml:"slave_id,omitempty"`
@@ -94,14 +107,38 @@ type ConnectionConfig struct {
 	// StopBits is the number of stop bits for RTU connections (1 or 2)
 	StopBits int `json:"stop_bits,omitempty" yaml:"stop_bits,omitempty"`
 
-	// Timeout is the connection/response timeout
-	Timeout time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	// === OPC UA Settings ===
 
-	// RetryCount is the number of retry attempts on failure
-	RetryCount int `json:"retry_count,omitempty" yaml:"retry_count,omitempty"`
+	// OPCEndpointURL is the full OPC UA endpoint URL (e.g., "opc.tcp://localhost:4840")
+	// If not provided, it will be constructed from Host:Port
+	OPCEndpointURL string `json:"opc_endpoint_url,omitempty" yaml:"opc_endpoint_url,omitempty"`
 
-	// RetryDelay is the delay between retry attempts
-	RetryDelay time.Duration `json:"retry_delay,omitempty" yaml:"retry_delay,omitempty"`
+	// OPCSecurityPolicy specifies the security policy (None, Basic128Rsa15, Basic256, Basic256Sha256)
+	OPCSecurityPolicy string `json:"opc_security_policy,omitempty" yaml:"opc_security_policy,omitempty"`
+
+	// OPCSecurityMode specifies the security mode (None, Sign, SignAndEncrypt)
+	OPCSecurityMode string `json:"opc_security_mode,omitempty" yaml:"opc_security_mode,omitempty"`
+
+	// OPCAuthMode specifies authentication mode (Anonymous, UserName, Certificate)
+	OPCAuthMode string `json:"opc_auth_mode,omitempty" yaml:"opc_auth_mode,omitempty"`
+
+	// OPCUsername for UserName authentication
+	OPCUsername string `json:"opc_username,omitempty" yaml:"opc_username,omitempty"`
+
+	// OPCPassword for UserName authentication
+	OPCPassword string `json:"opc_password,omitempty" yaml:"opc_password,omitempty"`
+
+	// OPCCertFile path for certificate authentication
+	OPCCertFile string `json:"opc_cert_file,omitempty" yaml:"opc_cert_file,omitempty"`
+
+	// OPCKeyFile path for private key (certificate authentication)
+	OPCKeyFile string `json:"opc_key_file,omitempty" yaml:"opc_key_file,omitempty"`
+
+	// OPCPublishInterval is the subscription publish interval for OPC UA
+	OPCPublishInterval time.Duration `json:"opc_publish_interval,omitempty" yaml:"opc_publish_interval,omitempty"`
+
+	// OPCSamplingInterval is the sampling interval for OPC UA monitored items
+	OPCSamplingInterval time.Duration `json:"opc_sampling_interval,omitempty" yaml:"opc_sampling_interval,omitempty"`
 }
 
 // Validate performs validation on the device configuration.
