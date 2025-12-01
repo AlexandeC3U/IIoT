@@ -1,5 +1,7 @@
 # Protocol Gateway Configuration
-# Environment: development, staging, production
+# This file contains all service configuration.
+# Environment variables can override these values with GATEWAY_ prefix.
+
 environment: development
 
 # Path to device configurations
@@ -12,10 +14,10 @@ http:
   write_timeout: 10s
   idle_timeout: 60s
 
-# MQTT Broker Configuration
+# MQTT Configuration
 mqtt:
-  broker_url: tcp://emqx:1883
-  client_id: protocol-gateway-01
+  broker_url: tcp://localhost:1883
+  client_id: protocol-gateway
   username: ""
   password: ""
   clean_session: true
@@ -23,14 +25,14 @@ mqtt:
   keep_alive: 30s
   connect_timeout: 10s
   reconnect_delay: 5s
-  max_reconnect: -1  # Unlimited reconnect attempts
+  max_reconnect: -1  # Unlimited
   buffer_size: 10000
   tls_enabled: false
-  # tls_cert_file: /certs/client.crt
-  # tls_key_file: /certs/client.key
-  # tls_ca_file: /certs/ca.crt
+  # tls_cert_file: /path/to/cert.pem
+  # tls_key_file: /path/to/key.pem
+  # tls_ca_file: /path/to/ca.pem
 
-# Modbus Connection Pool Configuration
+# Modbus Connection Pool
 modbus:
   max_connections: 100
   idle_timeout: 5m
@@ -38,6 +40,27 @@ modbus:
   connection_timeout: 10s
   retry_attempts: 3
   retry_delay: 100ms
+
+# OPC UA Connection Pool
+opcua:
+  max_connections: 50
+  idle_timeout: 5m
+  health_check_period: 30s
+  connection_timeout: 15s
+  retry_attempts: 3
+  retry_delay: 500ms
+  default_security_policy: None
+  default_security_mode: None
+  default_auth_mode: Anonymous
+
+# S7 Connection Pool
+s7:
+  max_connections: 100
+  idle_timeout: 5m
+  health_check_period: 30s
+  connection_timeout: 10s
+  retry_attempts: 3
+  retry_delay: 500ms
 
 # Polling Service Configuration
 polling:
@@ -49,8 +72,7 @@ polling:
 
 # Logging Configuration
 logging:
-  level: info       # trace, debug, info, warn, error
-  format: json      # json or console
-  output: stdout    # stdout, stderr, or file path
-  time_format: "2006-01-02T15:04:05.000Z07:00"
-
+  level: info        # trace, debug, info, warn, error
+  format: json       # json or console
+  output: stdout     # stdout, stderr, or file path
+  time_format: "2006-01-02T15:04:05.999999999Z07:00"

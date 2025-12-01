@@ -14,6 +14,9 @@ import (
 	"github.com/nexus-edge/protocol-gateway/internal/adapter/config"
 	"github.com/nexus-edge/protocol-gateway/internal/adapter/modbus"
 	"github.com/nexus-edge/protocol-gateway/internal/adapter/mqtt"
+	"github.com/nexus-edge/protocol-gateway/internal/adapter/opcua"
+	"github.com/nexus-edge/protocol-gateway/internal/adapter/s7"
+	"github.com/nexus-edge/protocol-gateway/internal/domain"
 	"github.com/nexus-edge/protocol-gateway/internal/health"
 	"github.com/nexus-edge/protocol-gateway/internal/metrics"
 	"github.com/nexus-edge/protocol-gateway/internal/service"
@@ -47,20 +50,20 @@ func main() {
 
 	// Initialize MQTT publisher
 	mqttPublisher, err := mqtt.NewPublisher(mqtt.Config{
-		BrokerURL:       cfg.MQTT.BrokerURL,
-		ClientID:        cfg.MQTT.ClientID,
-		Username:        cfg.MQTT.Username,
-		Password:        cfg.MQTT.Password,
-		CleanSession:    cfg.MQTT.CleanSession,
-		QoS:             cfg.MQTT.QoS,
-		KeepAlive:       cfg.MQTT.KeepAlive,
-		ConnectTimeout:  cfg.MQTT.ConnectTimeout,
-		ReconnectDelay:  cfg.MQTT.ReconnectDelay,
-		MaxReconnect:    cfg.MQTT.MaxReconnect,
-		TLSEnabled:      cfg.MQTT.TLSEnabled,
-		TLSCertFile:     cfg.MQTT.TLSCertFile,
-		TLSKeyFile:      cfg.MQTT.TLSKeyFile,
-		TLSCAFile:       cfg.MQTT.TLSCAFile,
+		BrokerURL:      cfg.MQTT.BrokerURL,
+		ClientID:       cfg.MQTT.ClientID,
+		Username:       cfg.MQTT.Username,
+		Password:       cfg.MQTT.Password,
+		CleanSession:   cfg.MQTT.CleanSession,
+		QoS:            cfg.MQTT.QoS,
+		KeepAlive:      cfg.MQTT.KeepAlive,
+		ConnectTimeout: cfg.MQTT.ConnectTimeout,
+		ReconnectDelay: cfg.MQTT.ReconnectDelay,
+		MaxReconnect:   cfg.MQTT.MaxReconnect,
+		TLSEnabled:     cfg.MQTT.TLSEnabled,
+		TLSCertFile:    cfg.MQTT.TLSCertFile,
+		TLSKeyFile:     cfg.MQTT.TLSKeyFile,
+		TLSCAFile:      cfg.MQTT.TLSCAFile,
 	}, logger, metricsRegistry)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create MQTT publisher")
@@ -71,6 +74,13 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to connect to MQTT broker")
 	}
 	defer mqttPublisher.Disconnect()
+
+	// =============================================================
+	// Initialize Protocol Pools
+	// =============================================================
+
+	// Create protocol manager
+	protocolManager := domain.NewProtocolManager()
 
 	// Initialize Modbus connection pool
 	modbusPool := modbus.NewConnectionPool(modbus.PoolConfig{
@@ -84,21 +94,70 @@ func main() {
 	}, logger, metricsRegistry)
 	defer modbusPool.Close()
 
-	// Initialize polling service
-	pollingSvc := service.NewPollingService(service.PollingConfig{
-		WorkerCount:      cfg.Polling.WorkerCount,
-		BatchSize:        cfg.Polling.BatchSize,
-		DefaultInterval:  cfg.Polling.DefaultInterval,
-		MaxRetries:       cfg.Polling.MaxRetries,
-		ShutdownTimeout:  cfg.Polling.ShutdownTimeout,
-	}, modbusPool, mqttPublisher, logger, metricsRegistry)
+	// Register Modbus protocols
+	protocolManager.RegisterPool(domain.ProtocolModbusTCP, modbusPool)
+	protocolManager.RegisterPool(domain.ProtocolModbusRTU, modbusPool)
+	logger.Info().Msg("Modbus connection pool initialized")
 
-	// Load device configurations and start polling
+	// Initialize OPC UA connection pool
+	opcuaPool := opcua.NewConnectionPool(opcua.PoolConfig{
+		MaxConnections:        cfg.OPCUA.MaxConnections,
+		IdleTimeout:           cfg.OPCUA.IdleTimeout,
+		HealthCheckPeriod:     cfg.OPCUA.HealthCheckPeriod,
+		ConnectionTimeout:     cfg.OPCUA.ConnectionTimeout,
+		RetryAttempts:         cfg.OPCUA.RetryAttempts,
+		RetryDelay:            cfg.OPCUA.RetryDelay,
+		CircuitBreakerName:    "opcua-pool",
+		DefaultSecurityPolicy: cfg.OPCUA.DefaultSecurityPolicy,
+		DefaultSecurityMode:   cfg.OPCUA.DefaultSecurityMode,
+		DefaultAuthMode:       cfg.OPCUA.DefaultAuthMode,
+	}, logger, metricsRegistry)
+	defer opcuaPool.Close()
+
+	// Register OPC UA protocol
+	protocolManager.RegisterPool(domain.ProtocolOPCUA, opcuaPool)
+	logger.Info().Msg("OPC UA connection pool initialized")
+
+	// Initialize S7 connection pool
+	s7Pool := s7.NewPool(s7.PoolConfig{
+		MaxConnections:      cfg.S7.MaxConnections,
+		IdleTimeout:         cfg.S7.IdleTimeout,
+		HealthCheckInterval: cfg.S7.HealthCheckPeriod,
+	}, logger)
+	defer s7Pool.Close()
+
+	// Register S7 protocol
+	protocolManager.RegisterPool(domain.ProtocolS7, s7Pool)
+	logger.Info().Msg("S7 connection pool initialized")
+
+	// =============================================================
+	// Initialize Services
+	// =============================================================
+
+	// Initialize polling service with protocol manager
+	pollingSvc := service.NewPollingService(service.PollingConfig{
+		WorkerCount:     cfg.Polling.WorkerCount,
+		BatchSize:       cfg.Polling.BatchSize,
+		DefaultInterval: cfg.Polling.DefaultInterval,
+		MaxRetries:      cfg.Polling.MaxRetries,
+		ShutdownTimeout: cfg.Polling.ShutdownTimeout,
+	}, protocolManager, mqttPublisher, logger, metricsRegistry)
+
+	// Load device configurations
 	devices, err := config.LoadDevices(cfg.DevicesConfigPath)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to load device configurations")
 	}
 	logger.Info().Int("count", len(devices)).Msg("Loaded device configurations")
+
+	// Count devices by protocol
+	protocolCounts := make(map[domain.Protocol]int)
+	for _, device := range devices {
+		protocolCounts[device.Protocol]++
+	}
+	for protocol, count := range protocolCounts {
+		logger.Info().Str("protocol", string(protocol)).Int("devices", count).Msg("Protocol device count")
+	}
 
 	// Register devices with polling service
 	for _, device := range devices {
@@ -112,6 +171,25 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to start polling service")
 	}
 
+	// Initialize command handler for bidirectional communication
+	cmdHandler := service.NewCommandHandler(
+		mqttPublisher.Client(),
+		protocolManager,
+		devices,
+		service.DefaultCommandConfig(),
+		logger,
+	)
+	if err := cmdHandler.Start(); err != nil {
+		logger.Warn().Err(err).Msg("Failed to start command handler (write operations disabled)")
+	} else {
+		logger.Info().Msg("Command handler started - bidirectional communication enabled")
+	}
+	defer cmdHandler.Stop()
+
+	// =============================================================
+	// Initialize Health Checks and HTTP Server
+	// =============================================================
+
 	// Initialize health checker
 	healthChecker := health.NewChecker(health.Config{
 		ServiceName:    serviceName,
@@ -119,6 +197,8 @@ func main() {
 	})
 	healthChecker.AddCheck("mqtt", mqttPublisher)
 	healthChecker.AddCheck("modbus_pool", modbusPool)
+	healthChecker.AddCheck("opcua_pool", opcuaPool)
+	healthChecker.AddCheck("s7_pool", s7Pool)
 
 	// Start HTTP server for health and metrics
 	mux := http.NewServeMux()
@@ -126,6 +206,17 @@ func main() {
 	mux.HandleFunc("/health/live", healthChecker.LivenessHandler)
 	mux.HandleFunc("/health/ready", healthChecker.ReadinessHandler)
 	mux.Handle("/metrics", promhttp.Handler())
+
+	// Add status endpoint
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		stats := pollingSvc.Stats()
+		fmt.Fprintf(w, `{"service":"%s","version":"%s","polling":{"total_polls":%d,"success_polls":%d,"failed_polls":%d,"points_read":%d,"points_published":%d}}`,
+			serviceName, serviceVersion,
+			stats.TotalPolls.Load(), stats.SuccessPolls.Load(), stats.FailedPolls.Load(),
+			stats.PointsRead.Load(), stats.PointsPublished.Load())
+	})
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.HTTP.Port),
@@ -143,6 +234,19 @@ func main() {
 		}
 	}()
 
+	// Log successful startup
+	logger.Info().
+		Int("modbus_devices", protocolCounts[domain.ProtocolModbusTCP]+protocolCounts[domain.ProtocolModbusRTU]).
+		Int("opcua_devices", protocolCounts[domain.ProtocolOPCUA]).
+		Int("s7_devices", protocolCounts[domain.ProtocolS7]).
+		Int("http_port", cfg.HTTP.Port).
+		Str("mqtt_broker", cfg.MQTT.BrokerURL).
+		Msg("Protocol Gateway started successfully")
+
+	// =============================================================
+	// Shutdown Handling
+	// =============================================================
+
 	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -154,7 +258,12 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Stop polling service first
+	// Stop command handler first
+	if err := cmdHandler.Stop(); err != nil {
+		logger.Error().Err(err).Msg("Error stopping command handler")
+	}
+
+	// Stop polling service
 	if err := pollingSvc.Stop(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("Error stopping polling service")
 	}
@@ -164,6 +273,6 @@ func main() {
 		logger.Error().Err(err).Msg("Error shutting down HTTP server")
 	}
 
+	// Close protocol pools (handled by defer)
 	logger.Info().Msg("Protocol Gateway shutdown complete")
 }
-

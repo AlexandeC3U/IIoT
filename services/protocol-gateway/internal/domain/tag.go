@@ -115,9 +115,39 @@ type Tag struct {
 	// OPCNamespaceIndex is the OPC UA namespace index (if not included in OPCNodeID)
 	OPCNamespaceIndex uint16 `json:"opc_namespace_index,omitempty" yaml:"opc_namespace_index,omitempty"`
 
+	// === S7 (Siemens) Specific Fields ===
+
+	// S7Area specifies the memory area (DB, M, I, Q, T, C)
+	S7Area S7Area `json:"s7_area,omitempty" yaml:"s7_area,omitempty"`
+
+	// S7DBNumber is the data block number (only for S7Area = DB)
+	S7DBNumber int `json:"s7_db_number,omitempty" yaml:"s7_db_number,omitempty"`
+
+	// S7Offset is the byte offset within the memory area
+	S7Offset int `json:"s7_offset,omitempty" yaml:"s7_offset,omitempty"`
+
+	// S7BitOffset is the bit offset for boolean types (0-7)
+	S7BitOffset int `json:"s7_bit_offset,omitempty" yaml:"s7_bit_offset,omitempty"`
+
+	// S7Address is a symbolic address string (e.g., "DB1.DBD0", "MW100", "I0.0")
+	// If provided, this will be parsed to extract Area, DBNumber, Offset, and BitOffset
+	S7Address string `json:"s7_address,omitempty" yaml:"s7_address,omitempty"`
+
 	// Metadata contains additional key-value pairs for this tag
 	Metadata map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
+
+// S7Area represents the Siemens S7 memory area type.
+type S7Area string
+
+const (
+	S7AreaDB S7Area = "DB" // Data Block
+	S7AreaM  S7Area = "M"  // Merker/Flags
+	S7AreaI  S7Area = "I"  // Inputs
+	S7AreaQ  S7Area = "Q"  // Outputs
+	S7AreaT  S7Area = "T"  // Timers
+	S7AreaC  S7Area = "C"  // Counters
+)
 
 // DeadbandType specifies how deadband filtering is applied.
 type DeadbandType string
@@ -139,25 +169,31 @@ func (t *Tag) Validate() error {
 	if t.TopicSuffix == "" {
 		return fmt.Errorf("tag topic suffix is required")
 	}
-	if t.RegisterType == "" {
-		return fmt.Errorf("register type is required for tag %s", t.ID)
-	}
 	if t.DataType == "" {
 		return fmt.Errorf("data type is required for tag %s", t.ID)
 	}
 
-	// Validate register count based on data type
-	expectedCount := t.ExpectedRegisterCount()
-	if t.RegisterCount == 0 {
-		t.RegisterCount = expectedCount
-	} else if t.RegisterCount < expectedCount {
-		return fmt.Errorf("register count %d is insufficient for data type %s (needs %d)",
-			t.RegisterCount, t.DataType, expectedCount)
+	// RegisterType is only required for Modbus tags (not OPC UA or S7)
+	// OPC UA uses OPCNodeID, S7 uses S7Address
+	isModbus := t.OPCNodeID == "" && t.S7Address == ""
+	if isModbus && t.RegisterType == "" {
+		return fmt.Errorf("register type is required for Modbus tag %s", t.ID)
 	}
 
-	// Set default byte order
-	if t.ByteOrder == "" {
-		t.ByteOrder = ByteOrderBigEndian
+	// Validate register count based on data type (Modbus only)
+	if isModbus {
+		expectedCount := t.ExpectedRegisterCount()
+		if t.RegisterCount == 0 {
+			t.RegisterCount = expectedCount
+		} else if t.RegisterCount < expectedCount {
+			return fmt.Errorf("register count %d is insufficient for data type %s (needs %d)",
+				t.RegisterCount, t.DataType, expectedCount)
+		}
+
+		// Set default byte order
+		if t.ByteOrder == "" {
+			t.ByteOrder = ByteOrderBigEndian
+		}
 	}
 
 	// Set default scale factor

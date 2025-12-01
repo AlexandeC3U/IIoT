@@ -139,6 +139,20 @@ type ConnectionConfig struct {
 
 	// OPCSamplingInterval is the sampling interval for OPC UA monitored items
 	OPCSamplingInterval time.Duration `json:"opc_sampling_interval,omitempty" yaml:"opc_sampling_interval,omitempty"`
+
+	// === S7 (Siemens) Settings ===
+
+	// S7Rack is the rack number of the PLC (usually 0)
+	S7Rack int `json:"s7_rack,omitempty" yaml:"s7_rack,omitempty"`
+
+	// S7Slot is the slot number of the CPU (usually 1 for S7-300/400, 0 or 1 for S7-1200/1500)
+	S7Slot int `json:"s7_slot,omitempty" yaml:"s7_slot,omitempty"`
+
+	// S7PDUSize is the maximum PDU size for communication (default: 480)
+	S7PDUSize int `json:"s7_pdu_size,omitempty" yaml:"s7_pdu_size,omitempty"`
+
+	// S7Timeout is the connection timeout for S7 (default: 10s)
+	S7Timeout time.Duration `json:"s7_timeout,omitempty" yaml:"s7_timeout,omitempty"`
 }
 
 // Validate performs validation on the device configuration.

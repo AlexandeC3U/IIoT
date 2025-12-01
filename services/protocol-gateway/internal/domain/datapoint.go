@@ -3,8 +3,17 @@ package domain
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
 )
+
+// dataPointPool is a sync.Pool for reusing DataPoint objects.
+// This reduces GC pressure in high-throughput scenarios.
+var dataPointPool = sync.Pool{
+	New: func() interface{} {
+		return &DataPoint{}
+	},
+}
 
 // Quality represents the quality/reliability of a data point.
 type Quality string
@@ -101,6 +110,7 @@ type DataPointBatch struct {
 }
 
 // NewDataPoint creates a new DataPoint with the current timestamp.
+// For high-throughput scenarios, consider using AcquireDataPoint() instead.
 func NewDataPoint(deviceID, tagID, topic string, value interface{}, unit string, quality Quality) *DataPoint {
 	return &DataPoint{
 		DeviceID:  deviceID,
@@ -113,6 +123,38 @@ func NewDataPoint(deviceID, tagID, topic string, value interface{}, unit string,
 	}
 }
 
+// AcquireDataPoint gets a DataPoint from the pool and initializes it.
+// This reduces GC pressure in high-throughput scenarios.
+// Remember to call ReleaseDataPoint() when done with the DataPoint.
+func AcquireDataPoint(deviceID, tagID, topic string, value interface{}, unit string, quality Quality) *DataPoint {
+	dp := dataPointPool.Get().(*DataPoint)
+	dp.DeviceID = deviceID
+	dp.TagID = tagID
+	dp.Topic = topic
+	dp.Value = value
+	dp.Unit = unit
+	dp.Quality = quality
+	dp.Timestamp = time.Now()
+	dp.RawValue = nil
+	dp.SourceTimestamp = nil
+	dp.Metadata = nil
+	return dp
+}
+
+// ReleaseDataPoint returns a DataPoint to the pool for reuse.
+// After calling this, the DataPoint should not be used anymore.
+func ReleaseDataPoint(dp *DataPoint) {
+	if dp == nil {
+		return
+	}
+	// Clear references to allow GC of referenced objects
+	dp.Value = nil
+	dp.RawValue = nil
+	dp.Metadata = nil
+	dp.SourceTimestamp = nil
+	dataPointPool.Put(dp)
+}
+
 // WithRawValue sets the raw value and returns the DataPoint for chaining.
 func (dp *DataPoint) WithRawValue(raw interface{}) *DataPoint {
 	dp.RawValue = raw
@@ -123,5 +165,25 @@ func (dp *DataPoint) WithRawValue(raw interface{}) *DataPoint {
 func (dp *DataPoint) WithMetadata(meta map[string]string) *DataPoint {
 	dp.Metadata = meta
 	return dp
+}
+
+// WithSourceTimestamp sets the source timestamp and returns the DataPoint for chaining.
+func (dp *DataPoint) WithSourceTimestamp(ts time.Time) *DataPoint {
+	dp.SourceTimestamp = &ts
+	return dp
+}
+
+// Reset clears the DataPoint for reuse.
+func (dp *DataPoint) Reset() {
+	dp.DeviceID = ""
+	dp.TagID = ""
+	dp.Topic = ""
+	dp.Value = nil
+	dp.RawValue = nil
+	dp.Unit = ""
+	dp.Quality = ""
+	dp.Timestamp = time.Time{}
+	dp.SourceTimestamp = nil
+	dp.Metadata = nil
 }
 

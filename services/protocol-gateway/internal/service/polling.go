@@ -14,12 +14,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ModbusPool interface defines the methods needed from the Modbus connection pool.
-type ModbusPool interface {
-	ReadTags(ctx context.Context, device *domain.Device, tags []*domain.Tag) ([]*domain.DataPoint, error)
-	ReadTag(ctx context.Context, device *domain.Device, tag *domain.Tag) (*domain.DataPoint, error)
-}
-
 // Publisher interface defines the methods needed for publishing data.
 type Publisher interface {
 	Publish(ctx context.Context, dataPoint *domain.DataPoint) error
@@ -27,20 +21,21 @@ type Publisher interface {
 }
 
 // PollingService orchestrates reading data from devices and publishing to MQTT.
+// It supports multiple protocols through the ProtocolManager.
 type PollingService struct {
-	config      PollingConfig
-	pool        ModbusPool
-	publisher   Publisher
-	logger      zerolog.Logger
-	metrics     *metrics.Registry
-	devices     map[string]*devicePoller
-	mu          sync.RWMutex
-	started     atomic.Bool
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	workerPool  chan struct{}
-	stats       *PollingStats
+	config          PollingConfig
+	protocolManager *domain.ProtocolManager
+	publisher       Publisher
+	logger          zerolog.Logger
+	metrics         *metrics.Registry
+	devices         map[string]*devicePoller
+	mu              sync.RWMutex
+	started         atomic.Bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	workerPool      chan struct{}
+	stats           *PollingStats
 }
 
 // PollingConfig holds configuration for the polling service.
@@ -82,7 +77,7 @@ type deviceStats struct {
 // NewPollingService creates a new polling service.
 func NewPollingService(
 	config PollingConfig,
-	pool ModbusPool,
+	protocolManager *domain.ProtocolManager,
 	publisher Publisher,
 	logger zerolog.Logger,
 	metricsReg *metrics.Registry,
@@ -102,14 +97,14 @@ func NewPollingService(
 	}
 
 	return &PollingService{
-		config:     config,
-		pool:       pool,
-		publisher:  publisher,
-		logger:     logger.With().Str("component", "polling-service").Logger(),
-		metrics:    metricsReg,
-		devices:    make(map[string]*devicePoller),
-		workerPool: make(chan struct{}, config.WorkerCount),
-		stats:      &PollingStats{},
+		config:          config,
+		protocolManager: protocolManager,
+		publisher:       publisher,
+		logger:          logger.With().Str("component", "polling-service").Logger(),
+		metrics:         metricsReg,
+		devices:         make(map[string]*devicePoller),
+		workerPool:      make(chan struct{}, config.WorkerCount),
+		stats:           &PollingStats{},
 	}
 }
 
@@ -285,11 +280,11 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 		return
 	}
 
-	// Read all tags from the device
+	// Read all tags from the device using the appropriate protocol
 	ctx, cancel := context.WithTimeout(s.ctx, dp.device.Connection.Timeout*2)
 	defer cancel()
 
-	dataPoints, err := s.pool.ReadTags(ctx, dp.device, tags)
+	dataPoints, err := s.protocolManager.ReadTags(ctx, dp.device, tags)
 	if err != nil {
 		s.stats.FailedPolls.Add(1)
 		dp.stats.errorCount.Add(1)

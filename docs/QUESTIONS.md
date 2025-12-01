@@ -16,7 +16,11 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 8. [Protocol Gateway: Code Architecture](#8️⃣-protocol-gateway-code-architecture)
 9. [Scaling: 1000+ or 10000+ Devices](#9️⃣-scaling-1000-or-10000-devices)
 10. [Device/Tag Configuration: Frontend → Database → Protocol Gateway](#🔟-devicetag-configuration-frontend--database--protocol-gateway)
-11. [Summary of Decisions](#summary-of-recommendations)
+11. [Data Normalizer: Status and Implementation](#1️⃣1️⃣-data-normalizer-status-and-implementation)
+12. [OPC UA: Polling vs Subscriptions](#1️⃣2️⃣-opc-ua-polling-vs-subscriptions)
+13. [Production Readiness Review](#1️⃣3️⃣-production-readiness-review)
+14. [Write Command Rate Limiting](#1️⃣4️⃣-write-command-rate-limiting)
+15. [Summary of Decisions](#summary-of-recommendations)
 
 ---
 
@@ -687,10 +691,10 @@ Given Neuron's licensing constraints, we will implement a **custom Go Protocol G
 │  │  │   mapping    │  │ • Unit conversion    │  │ • Batching       │   │    │
 │  │  │ • Metadata   │  │ • Quality codes      │  │ • Topic routing  │   │    │
 │  │  └──────────────┘  └──────────────────────┘  └────────┬─────────┘   │    │
-│  │                                                        │            │    │
-│  └────────────────────────────────────────────────────────┼────────────┘    │
-│                                                           │                 │
-│                                                           ▼                 │
+│  │                                                       │             │    │
+│  └───────────────────────────────────────────────────────┼─────────────┘    │
+│                                                          │                  │
+│                                                          ▼                  │
 │                                                    ┌──────────────┐         │
 │                                                    │  EMQX BROKER │         │
 │                                                    └──────────────┘         │
@@ -1071,6 +1075,193 @@ spec:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**Key Principle**: Scale OUT (more instances), not UP (bigger pools). This provides fault isolation, rolling updates, and geographic distribution.
+
+
+### Single Plant, Multiple Instances
+
+A single plant can (and often should) have multiple gateway instances:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SINGLE PLANT - MULTIPLE INSTANCES                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   PLANT CHICAGO (500 devices total)                                         │
+│                                                                             │
+│   ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐             │
+│   │  Instance 1     │  │  Instance 2     │  │  Instance 3     │             │
+│   │  (Line 1-2)     │  │  (Line 3-4)     │  │  (Line 5-6)     │             │
+│   │                 │  │                 │  │                 │             │
+│   │  Devices:       │  │  Devices:       │  │  Devices:       │             │
+│   │  - plc-l1-001   │  │  - plc-l3-001   │  │  - plc-l5-001   │             │
+│   │  - plc-l1-002   │  │  - plc-l3-002   │  │  - plc-l5-002   │             │
+│   │  - plc-l2-001   │  │  - plc-l4-001   │  │  - plc-l6-001   │             │
+│   │  - sensor-l1-*  │  │  - sensor-l3-*  │  │  - sensor-l5-*  │             │
+│   │  (~170 devices) │  │  (~170 devices) │  │  (~160 devices) │             │
+│   │                 │  │                 │  │                 │             │
+│   │  Workers: 10    │  │  Workers: 10    │  │  Workers: 10    │             │
+│   │  Connections:   │  │  Connections:   │  │  Connections:   │             │
+│   │  100 Modbus     │  │  100 Modbus     │  │  100 Modbus     │             │
+│   └────────┬────────┘  └────────┬────────┘  └────────┬────────┘             │
+│            │                    │                    │                      │
+│            └────────────────────┼────────────────────┘                      │
+│                                 │                                           │
+│                                 ▼                                           │
+│                    ┌────────────────────────┐                               │
+│                    │      EMQX Broker       │                               │
+│                    │                        │                               │
+│                    │  All publish to same   │                               │
+│                    │  UNS topics:           │                               │
+│                    │  chicago/line-1/...    │                               │
+│                    │  chicago/line-2/...    │                               │
+│                    │  chicago/line-3/...    │                               │
+│                    └────────────────────────┘                               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Partitioning Strategies for Single Plant:**
+
+| Strategy | Best For | Example |
+|----------|----------|---------|
+| **By Production Line** | Manufacturing plants | Instance 1: Lines 1-2, Instance 2: Lines 3-4 |
+| **By Protocol** | Mixed protocol environments | Instance 1: All Modbus, Instance 2: All OPC UA |
+| **By Criticality** | Safety-critical operations | Instance 1: Safety PLCs (dedicated), Instance 2-3: HVAC, utilities |
+| **By Network Segment** | Segmented OT networks | Instance per VLAN/subnet |
+
+### Write Command Routing (Multiple Instances)
+
+When multiple gateway instances exist, write commands are correctly routed:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   WRITE COMMAND ROUTING (MULTIPLE INSTANCES)                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Write Command Published: $nexus/cmd/plc-l3-001/setpoint/set                │
+│                                                                             │
+│  ┌─────────────────┐                                                        │
+│  │  Instance 1     │  Receives command via shared subscription              │
+│  │  (Lines 1-2)    │  → Device "plc-l3-001" NOT in my registry              │
+│  │                 │  → Ignore (no response sent)                           │
+│  └─────────────────┘                                                        │
+│                                                                             │
+│  ┌─────────────────┐                                                        │
+│  │  Instance 2     │  Receives command via shared subscription              │
+│  │  (Lines 3-4)    │  → Device "plc-l3-001" FOUND in my registry            │
+│  │       ✓         │  → Execute write to device                             │
+│  │                 │  → Publish response to $nexus/cmd/response/...         │
+│  └─────────────────┘                                                        │
+│                                                                             │
+│  ┌─────────────────┐                                                        │
+│  │  Instance 3     │  Receives command via shared subscription              │
+│  │  (Lines 5-6)    │  → Device "plc-l3-001" NOT in my registry              │
+│  │                 │  → Ignore (no response sent)                           │
+│  └─────────────────┘                                                        │
+│                                                                             │
+│  Key Code (command_handler.go):                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  device, exists := h.devices[cmd.DeviceID]                           │   │
+│  │  if !exists {                                                        │   │
+│  │      // Not my device - ignore silently                              │   │
+│  │      return                                                          │   │
+│  │  }                                                                   │   │
+│  │  // My device - process the write command                            │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### EMQX Broker Scaling
+
+When the EMQX broker becomes a bottleneck, add cluster nodes:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        EMQX CLUSTER SCALING                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  SINGLE NODE (Default)              CLUSTERED (Scaled)                      │
+│  ─────────────────────              ───────────────────                     │
+│                                                                             │
+│  ┌─────────────────────┐            ┌─────────────────────────────────────┐ │
+│  │     EMQX Node       │            │         EMQX Cluster                │ │
+│  │                     │            │  ┌───────┐ ┌───────┐ ┌───────┐      │ │
+│  │  Connections: 100K  │   ───►     │  │ Node1 │ │ Node2 │ │ Node3 │      │ │
+│  │  Messages: 500K/sec │            │  │ 100K  │ │ 100K  │ │ 100K  │      │ │
+│  │                     │            │  └───┬───┘ └───┬───┘ └───┬───┘      │ │
+│  └─────────────────────┘            │      └─────────┼─────────┘          │ │
+│                                     │        Cluster Backbone             │ │
+│                                     │        (Erlang Distribution)        │ │
+│                                     │                                     │ │
+│                                     │  Total: 300K connections            │ │
+│                                     │         1.5M messages/sec           │ │
+│                                     └─────────────────────────────────────┘ │
+│                                                                             │
+│  Kubernetes EMQX Operator:                                                  │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │  apiVersion: apps.emqx.io/v2beta1                                    │   │
+│  │  kind: EMQX                                                          │   │
+│  │  spec:                                                               │   │
+│  │    image: emqx/emqx:5.5                                              │   │
+│  │    coreTemplate:                                                     │   │
+│  │      spec:                                                           │   │
+│  │        replicas: 3  # Easy scaling!                                  │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  EMQX Scaling Capabilities:                                                 │
+│  ┌────────────────┬────────────────┬────────────────┬────────────────┐      │
+│  │ Metric         │ 1 Node         │ 3 Nodes        │ 5 Nodes        │      │
+│  ├────────────────┼────────────────┼────────────────┼────────────────┤      │
+│  │ Connections    │ ~100K          │ ~300K          │ ~500K+         │      │
+│  │ Messages/sec   │ ~500K          │ ~1.5M          │ ~2.5M+         │      │
+│  │ Topics         │ Millions       │ Millions       │ Millions       │      │
+│  │ Latency        │ <1ms           │ <2ms           │ <3ms           │      │
+│  └────────────────┴────────────────┴────────────────┴────────────────┘      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Complete Scaled Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FULLY SCALED NEXUS EDGE PLATFORM                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  PROTOCOL GATEWAYS (6 instances)          EMQX CLUSTER (3 nodes)            │
+│  ┌───────┐ ┌───────┐ ┌───────┐           ┌───────────────────────┐          │
+│  │ GW-1  │ │ GW-2  │ │ GW-3  │           │  ┌─────┐ ┌─────┐      │          │
+│  │Line1-2│ │Line3-4│ │Line5-6│◄─────────►│  │EMQX1│ │EMQX2│      │          │
+│  └───────┘ └───────┘ └───────┘           │  └─────┘ └─────┘      │          │
+│  ┌───────┐ ┌───────┐ ┌───────┐           │       ┌─────┐         │          │
+│  │ GW-4  │ │ GW-5  │ │ GW-6  │◄─────────►│       │EMQX3│         │          │
+│  │OPC UA │ │Plant B│ │Plant C│           │       └─────┘         │          │
+│  └───────┘ └───────┘ └───────┘           └───────────────────────┘          │
+│                                                     │                       │
+│                                                     ▼                       │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                         CONSUMERS                                    │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │   │
+│  │  │ TimescaleDB │  │  Node-RED   │  │   API (3x)  │  │  Frontend   │  │   │
+│  │  │ (2 replicas)│  │  (2 pods)   │  │  instances  │  │  (3 pods)   │  │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Scaling Summary
+
+| Component | Scaling Method | Per-Instance Resources | Max Capacity |
+|-----------|---------------|------------------------|--------------|
+| **Protocol Gateway** | Add instances, partition devices | Own workers, pools, device registry | Unlimited |
+| **EMQX Broker** | Add cluster nodes | Shared state via Erlang | Millions of connections |
+| **TimescaleDB** | Read replicas, partitioning | Per-node storage | Petabytes |
+| **API Service** | Kubernetes replicas | Stateless | Unlimited |
+| **Frontend** | CDN + replicas | Stateless | Unlimited |
+
 ### Summary
 
 | Scale | Strategy |
@@ -1079,8 +1270,6 @@ spec:
 | **100-1000 devices** | Multiple gateways, partitioned by location |
 | **1000-10000 devices** | Regional gateway clusters + EMQX clusters |
 | **10000+ devices** | Federated multi-region architecture |
-
-**Key Principle**: Scale OUT (more instances), not UP (bigger pools). This provides fault isolation, rolling updates, and geographic distribution.
 
 ---
 
@@ -1294,6 +1483,767 @@ func (cm *ConfigManager) handleConfigUpdate(msg mqtt.Message) {
 
 ---
 
+## 1️⃣1️⃣ Data Normalizer: Status and Implementation
+
+**Question:** I saw in the docs that there is a DATA NORMALIZER module, is this already in place? Is it scheduled to be developed later?
+
+**Answer:** The Data Normalizer is **partially implemented within the protocol adapters** and **scheduled for extraction** into a dedicated module.
+
+### What Is the Data Normalizer?
+
+The Data Normalizer transforms raw device values into standardized, enriched data points suitable for the Unified Namespace.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       DATA NORMALIZER FUNCTION                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  INPUT (Raw from Protocol Adapter):                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  {                                                                  │    │
+│  │    device_id: "plc-001",                                            │    │
+│  │    tag_id: "temp-sensor-1",                                         │    │
+│  │    address: "DB1.DBD0",                                             │    │
+│  │    raw_bytes: [0x42, 0xA8, 0x00, 0x00],  // REAL: 84.0              │    │
+│  │    timestamp: 1700000000000                                         │    │
+│  │  }                                                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                   │                                         │
+│                                   ▼                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                     DATA NORMALIZER PIPELINE                        │    │
+│  │                                                                     │    │
+│  │   1. Type Conversion       float32(0x42A80000) → 84.0               │    │
+│  │   2. Scaling              84.0 × 1.0 + 0 = 84.0                     │    │
+│  │   3. Unit Assignment       84.0 → 84.0 °C                           │    │
+│  │   4. Quality Assessment    → QualityGood                            │    │
+│  │   5. Topic Assignment      → plant1/line2/plc1/temperature          │    │
+│  │   6. Metadata Enrichment   → { source: "s7", protocol: "s7" }       │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                   │                                         │
+│                                   ▼                                         │
+│  OUTPUT (Normalized DataPoint):                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  {                                                                  │    │
+│  │    topic: "plant1/line2/plc1/temperature",                          │    │
+│  │    value: 84.0,                                                     │    │
+│  │    unit: "°C",                                                      │    │
+│  │    quality: "GOOD",                                                 │    │
+│  │    timestamp: 1700000000000,                                        │    │
+│  │    source_timestamp: 1700000000000,                                 │    │
+│  │    metadata: { device_id: "plc-001", raw_value: 84.0 }              │    │
+│  │  }                                                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Current Implementation Status
+
+| Feature | Status | Location |
+|---------|--------|----------|
+| **Type Conversion** | ✅ Implemented | `client.go` → `parseValue()` |
+| **Scaling/Offset** | ✅ Implemented | `client.go` → `applyScaling()` |
+| **Unit Assignment** | ✅ Implemented | `datapoint.go` → `Unit` field |
+| **Quality Codes** | ✅ Implemented | `datapoint.go` → `Quality` field |
+| **Topic Generation** | ✅ Implemented | `publisher.go` → `BuildTopic()` |
+| **Byte Ordering** | ✅ Implemented | Modbus `client.go` → `reorderBytes()` |
+| **Reverse Scaling (Write)** | ✅ Implemented | `client.go` → `reverseScaling()` |
+| **Deadband Filtering** | ⚠️ Designed | OPC UA subscription only |
+| **Unit Conversion** | ❌ Not Implemented | °F → °C, bar → psi |
+| **Value Clamping** | ❌ Not Implemented | Min/max limits |
+| **Expression Evaluation** | ❌ Not Implemented | Calculated tags |
+
+### Where Is It Currently?
+
+The normalization logic is **distributed across protocol adapters**:
+
+```
+services/protocol-gateway/internal/
+├── adapter/
+│   ├── modbus/
+│   │   └── client.go     ← parseValue(), applyScaling(), reorderBytes()
+│   ├── opcua/
+│   │   └── client.go     ← variantToValue(), applyScaling()
+│   └── s7/
+│       └── client.go     ← parseValue(), applyScaling()
+└── domain/
+    └── datapoint.go      ← DataPoint struct with Quality, Unit
+```
+
+### Planned Extraction: `internal/core/normalizer.go`
+
+The architecture envisions a dedicated normalizer module:
+
+```go
+// internal/core/normalizer.go (PLANNED)
+
+type Normalizer struct {
+    registry *TagRegistry
+    logger   zerolog.Logger
+}
+
+// Normalize transforms raw protocol data into a standardized DataPoint.
+func (n *Normalizer) Normalize(raw *RawReading, tag *domain.Tag) *domain.DataPoint {
+    // 1. Parse raw bytes based on data type
+    value := n.parseValue(raw.Bytes, tag)
+    
+    // 2. Apply scaling and offset
+    scaledValue := n.applyScaling(value, tag)
+    
+    // 3. Apply unit conversion if needed (°F → °C)
+    convertedValue := n.convertUnits(scaledValue, tag)
+    
+    // 4. Apply value clamping
+    clampedValue := n.clampValue(convertedValue, tag)
+    
+    // 5. Determine quality
+    quality := n.assessQuality(raw, tag)
+    
+    // 6. Build topic
+    topic := n.buildTopic(tag)
+    
+    // 7. Create data point
+    return domain.NewDataPoint(
+        raw.DeviceID,
+        tag.ID,
+        topic,
+        clampedValue,
+        tag.Unit,
+        quality,
+    ).WithRawValue(value)
+}
+```
+
+### When to Extract?
+
+**Current approach is acceptable** for Phase 1:
+- Simple, direct code path
+- No additional abstraction layer
+- Each adapter handles its own data types efficiently
+
+**Consider extracting when:**
+- Unit conversion is needed (°F → °C, psi → bar)
+- Calculated/derived tags are required
+- Complex transformations across protocols
+- Need for centralized deadband filtering
+
+### Phase 2 Roadmap for Normalizer
+
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| **Unit Conversion** | Medium | Automatic conversion between units |
+| **Value Clamping** | Low | Enforce min/max limits |
+| **Calculated Tags** | Medium | Virtual tags from expressions |
+| **Deadband** | High | Reduce MQTT traffic for slow-changing values |
+| **Enumeration Mapping** | Low | Integer → string state names |
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| **Is Data Normalizer implemented?** | ⚠️ **Partially** - Core functions exist in adapters |
+| **Is it a separate module?** | ❌ **Not yet** - Distributed across adapters |
+| **When will it be extracted?** | 🔜 **Phase 2** - When unit conversion/expressions needed |
+| **Does current approach work?** | ✅ **Yes** - Meets Phase 1 requirements |
+
+---
+
+## 1️⃣2️⃣ OPC UA: Polling vs Subscriptions
+
+**Question:** Won't the polling service conflict with OPC UA subscription logic? They seem to do the same thing.
+
+**Answer:** They serve **different use cases** and are **mutually exclusive per device**. No conflict occurs.
+
+### Understanding the Two Approaches
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   OPC UA: POLLING vs SUBSCRIPTIONS                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  POLLING (PollingService)                                                   │
+│  ─────────────────────────                                                  │
+│  Gateway initiates reads at fixed intervals                                 │
+│                                                                             │
+│   Gateway                      OPC UA Server                                │
+│   ┌──────┐                     ┌──────────┐                                 │
+│   │      │ ─── Read Request ──►│          │                                 │
+│   │      │ ◄── Response ───────│          │                                 │
+│   │      │                     │          │                                 │
+│   │      │   (wait 1s)         │          │                                 │
+│   │      │                     │          │                                 │
+│   │      │ ─── Read Request ──►│          │                                 │
+│   │      │ ◄── Response ───────│          │                                 │
+│   └──────┘                     └──────────┘                                 │
+│                                                                             │
+│  Best For:                                                                  │
+│  • Simple OPC UA servers that don't support subscriptions                   │
+│  • Devices with limited subscription capacity                               │
+│  • Uniform polling requirements                                             │
+│  • Debugging and testing                                                    │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  SUBSCRIPTIONS (SubscriptionManager)                                        │
+│  ───────────────────────────────────                                        │
+│  Server pushes changes when they occur (Report-by-Exception)                │
+│                                                                             │
+│   Gateway                      OPC UA Server                                │
+│   ┌──────┐                      ┌──────────┐                                │
+│   │      │ ─ CreateSubscription►│          │                                │
+│   │      │ ◄── Acknowledged ────│          │                                │
+│   │      │                      │          │                                │
+│   │      │ ◄── DataChange ───── │ (value changed!)                          │
+│   │      │ ◄── DataChange ───── │ (another change!)                         │
+│   │      │                      │          │                                │
+│   │      │     (no traffic if no change)   │                                │
+│   │      │                      │          │                                │
+│   │      │ ◄── DataChange ───── │ (value changed again!)                    │
+│   └──────┘                      └──────────┘                                │
+│                                                                             │
+│  Best For:                                                                  │
+│  • Production OPC UA deployments                                            │
+│  • Large tag counts (reduces network traffic)                               │
+│  • Fast-changing values (immediate notification)                            │
+│  • Slow-changing values with deadband (reduces traffic)                     │
+│  • OPC UA specification compliance                                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### How Conflict Is Avoided
+
+The architecture uses **one approach per device**, determined by configuration:
+
+```yaml
+# devices.yaml
+
+# Device using POLLING (current implementation)
+- id: opcua-server-001
+  protocol: opcua
+  poll_interval: 1s  # <-- Indicates polling mode
+  connection:
+    opc_endpoint_url: opc.tcp://192.168.1.100:4840
+  tags:
+    - id: temperature
+      opc_node_id: "ns=2;s=Temperature"
+
+# Device using SUBSCRIPTIONS (enhanced mode)
+- id: opcua-server-002
+  protocol: opcua
+  subscription_mode: true  # <-- Indicates subscription mode (future)
+  connection:
+    opc_endpoint_url: opc.tcp://192.168.1.101:4840
+    opc_publish_interval: 500ms
+    opc_sampling_interval: 100ms
+  tags:
+    - id: pressure
+      opc_node_id: "ns=2;s=Pressure"
+```
+
+### Current Implementation: Polling-First
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CURRENT IMPLEMENTATION                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  PollingService (ACTIVE)                                                    │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  • All OPC UA devices are polled using ReadTags()                     │  │
+│  │  • Uses opcua.ConnectionPool.ReadTags() → opcua.Client.ReadTags()     │  │
+│  │  • Consistent with Modbus and S7 behavior                             │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  SubscriptionManager (AVAILABLE but NOT YET WIRED)                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │  • subscription.go is implemented                                     │  │
+│  │  • Not yet integrated into main.go or PollingService                  │  │
+│  │  • Will be enabled via configuration flag                             │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Decision Flow (Future):                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  if device.SubscriptionMode == true {                               │    │
+│  │      // Use SubscriptionManager → pushes data to MQTT               │    │
+│  │      subscriptionManager.Subscribe(device, tags, config)            │    │
+│  │  } else {                                                           │    │
+│  │      // Use PollingService → pulls data and publishes               │    │
+│  │      pollingService.RegisterDevice(device)                          │    │
+│  │  }                                                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Both Exist
+
+| Feature | Polling | Subscription |
+|---------|---------|--------------|
+| **Implementation Complexity** | Simple | Complex |
+| **Network Traffic** | Constant | On-change only |
+| **Server Load** | Higher | Lower |
+| **Latency** | poll_interval | Near real-time |
+| **Server Compatibility** | All OPC UA | Requires subscription support |
+| **Deadband Filtering** | Client-side | Server-side |
+| **Consistency with other protocols** | ✅ Same as Modbus/S7 | ❌ Different pattern |
+
+### Subscription Integration (Planned Enhancement)
+
+When subscriptions are fully integrated:
+
+```go
+// main.go (future enhancement)
+
+// OPC UA devices using subscriptions
+if cfg.OPCUA.EnableSubscriptions {
+    subscriptionManager := opcua.NewSubscriptionManager(
+        opcuaPool,
+        func(dp *domain.DataPoint) {
+            mqttPublisher.Publish(ctx, dp)  // Push directly to MQTT
+        },
+        logger,
+    )
+    
+    for _, device := range devices {
+        if device.Protocol == domain.ProtocolOPCUA && device.UseSubscriptions {
+            subscriptionManager.Subscribe(device, device.Tags, opcua.DefaultSubscriptionConfig())
+        } else if device.Protocol == domain.ProtocolOPCUA {
+            pollingSvc.RegisterDevice(ctx, device)  // Fallback to polling
+        }
+    }
+}
+```
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| **Will they conflict?** | ❌ **No** - One approach per device |
+| **Which is used currently?** | **Polling** - Subscriptions are implemented but not wired |
+| **When to use subscriptions?** | When OPC UA server supports them and you want reduced traffic |
+| **When to use polling?** | For compatibility, debugging, or uniform behavior with Modbus/S7 |
+
+---
+
+## 1️⃣3️⃣ Production Readiness Review
+
+**Question:** Is the Protocol Gateway production-ready? What optimizations and best practices are in place?
+
+**Answer:** The current implementation incorporates **production-grade patterns** with some areas for future enhancement.
+
+### Production Readiness Checklist
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PRODUCTION READINESS ASSESSMENT                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ✅ IMPLEMENTED (Production-Ready)                                          │
+│  ─────────────────────────────────                                          │
+│                                                                             │
+│  Architecture & Design:                                                     │
+│  ├── ✅ Clean Architecture (domain/adapter/service separation)              │
+│  ├── ✅ Protocol-agnostic core with pluggable adapters                      │
+│  ├── ✅ Single binary deployment (Go compilation)                           │
+│  └── ✅ Stateless design (easy horizontal scaling)                          │
+│                                                                             │
+│  Resilience & Fault Tolerance:                                              │
+│  ├── ✅ Circuit breakers per protocol pool (gobreaker)                      │
+│  ├── ✅ Automatic reconnection on connection loss                           │
+│  ├── ✅ Graceful shutdown with cleanup                                      │
+│  ├── ✅ Context-based timeouts and cancellation                             │
+│  └── ✅ Error isolation (one device failure doesn't affect others)          │
+│                                                                             │
+│  Connection Management:                                                     │
+│  ├── ✅ Connection pooling for all protocols                                │
+│  ├── ✅ Idle connection reaping                                             │
+│  ├── ✅ Health checks with automatic recovery                               │
+│  ├── ✅ Configurable pool sizes                                             │
+│  └── ✅ Thread-safe pool access                                             │
+│                                                                             │
+│  Observability:                                                             │
+│  ├── ✅ Structured logging (zerolog, JSON format)                           │
+│  ├── ✅ Prometheus metrics endpoint                                         │
+│  ├── ✅ Health check endpoints (/health, /health/live, /health/ready)       │
+│  ├── ✅ Status endpoint with polling statistics                             │
+│  └── ✅ Per-device and per-tag metrics tracking                             │
+│                                                                             │
+│  Configuration:                                                             │
+│  ├── ✅ YAML file + environment variables                                   │
+│  ├── ✅ Sensible defaults for all settings                                  │
+│  ├── ✅ Configuration validation on startup                                 │
+│  └── ✅ Protocol-specific configuration sections                            │
+│                                                                             │
+│  Bidirectional Communication:                                               │
+│  ├── ✅ MQTT command handler for writes                                     │
+│  ├── ✅ Request/response pattern with correlation                           │
+│  ├── ✅ Write validation (tag writability check)                            │
+│  └── ✅ Acknowledgement publishing                                          │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ⚠️ RECOMMENDED ENHANCEMENTS (Phase 2)                                      │
+│  ─────────────────────────────────────                                      │
+│                                                                             │
+│  Database Integration:                                                      │
+│  ├── ⚠️ PostgreSQL adapter for device config (currently YAML only)          │
+│  └── ⚠️ MQTT-based config sync for dynamic updates                          │
+│                                                                             │
+│  Advanced Features:                                                         │
+│  ├── ⚠️ OPC UA subscription integration (implemented but not wired)         │
+│  ├── ⚠️ Per-tag polling intervals                                           │
+│  ├── ⚠️ Client-side deadband filtering                                      │
+│  └── ⚠️ Rate limiting for write commands                                    │
+│                                                                             │
+│  Security:                                                                  │
+│  ├── ⚠️ MQTT TLS configuration (supported, needs testing)                   │
+│  ├── ⚠️ OPC UA certificate security (supported, needs testing)              │
+│  └── ⚠️ Secret management (consider Kubernetes secrets)                     │
+│                                                                             │
+│  Deployment:                                                                │
+│  ├── ⚠️ Kubernetes manifests (not yet created)                              │
+│  ├── ⚠️ Helm charts (not yet created)                                       │
+│  └── ⚠️ CI/CD pipeline (not yet created)                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Production Patterns Implemented
+
+#### 1. Circuit Breaker Pattern
+
+```go
+// Each protocol pool has its own circuit breaker
+circuitBreaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
+    Name:        "modbus-pool",
+    MaxRequests: 3,                    // Requests in half-open state
+    Interval:    10 * time.Second,     // Reset failure count after this
+    Timeout:     30 * time.Second,     // Stay open for this duration
+    ReadyToTrip: func(counts gobreaker.Counts) bool {
+        failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+        return counts.Requests >= 5 && failureRatio >= 0.6  // Trip at 60% failure
+    },
+})
+```
+
+Benefits:
+- Prevents cascading failures
+- Fast-fails during outages (no waiting for timeouts)
+- Automatic recovery when device comes back
+
+#### 2. Connection Pooling with Health Checks
+
+```go
+// Background health check loop
+func (p *ConnectionPool) healthCheckLoop() {
+    ticker := time.NewTicker(p.config.HealthCheckPeriod)
+    for range ticker.C {
+        for _, client := range p.clients {
+            if !client.IsConnected() {
+                client.Reconnect()  // Automatic recovery
+            }
+        }
+    }
+}
+
+// Idle connection reaper
+func (p *ConnectionPool) idleReaperLoop() {
+    // Close connections idle for > IdleTimeout
+    // Prevents resource leaks
+}
+```
+
+#### 3. Worker Pool for Controlled Concurrency
+
+```go
+type PollingService struct {
+    workerPool chan struct{}  // Semaphore pattern
+}
+
+func (s *PollingService) pollDevice(dp *devicePoller) {
+    // Acquire worker slot
+    select {
+    case s.workerPool <- struct{}{}:
+        defer func() { <-s.workerPool }()
+    case <-s.ctx.Done():
+        return  // Graceful shutdown
+    }
+    
+    // ... perform polling
+}
+```
+
+Benefits:
+- Limits concurrent connections
+- Prevents resource exhaustion
+- Controlled backpressure
+
+#### 4. Graceful Shutdown
+
+```go
+func main() {
+    // Wait for shutdown signal
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+    
+    // Create shutdown context with timeout
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    
+    // Stop services in order
+    commandHandler.Stop()      // Stop accepting new commands
+    pollingSvc.Stop(shutdownCtx)  // Wait for in-flight polls
+    httpServer.Shutdown(shutdownCtx)  // Drain HTTP connections
+    // Pools closed via defer
+}
+```
+
+### Performance Characteristics
+
+| Metric | Expected Value | Notes |
+|--------|----------------|-------|
+| **Memory** | ~50-100MB base + ~50KB/connection | Scales linearly with devices |
+| **CPU** | <5% at 100 devices, 1s polling | Mostly I/O bound |
+| **Startup** | <1 second | Single binary, no dependencies |
+| **Latency** | <10ms per read operation | Network-dependent |
+| **Throughput** | 5,000-10,000 tags/second | Per instance, protocol-dependent |
+
+### Configuration Best Practices
+
+```yaml
+# config/config.yaml - Production settings
+
+environment: production
+
+modbus:
+  max_connections: 100      # Tune based on device count
+  idle_timeout: 5m          # Keep connections warm
+  health_check_period: 30s  # Balance between freshness and load
+  connection_timeout: 10s   # Reasonable for industrial networks
+  retry_attempts: 3         # Handle transient failures
+  retry_delay: 100ms        # Exponential backoff recommended
+
+opcua:
+  max_connections: 50       # OPC UA connections are heavier
+  connection_timeout: 15s   # OPC UA handshake is slower
+  retry_delay: 500ms        # OPC UA recovery takes longer
+
+polling:
+  worker_count: 10          # Adjust based on device count
+  batch_size: 50            # Tune for your PLC capabilities
+  default_interval: 1s      # Balance freshness vs load
+  shutdown_timeout: 30s     # Allow in-flight operations to complete
+
+logging:
+  level: info               # Use 'debug' only for troubleshooting
+  format: json              # For log aggregation (ELK, Loki)
+```
+
+### Kubernetes Deployment Recommendations
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  replicas: 2  # At least 2 for HA
+  template:
+    spec:
+      containers:
+        - name: protocol-gateway
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+```
+
+### Summary
+
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| **Core Functionality** | ✅ **Production-Ready** | All 3 protocols, bidirectional |
+| **Resilience** | ✅ **Production-Ready** | Circuit breakers, reconnection |
+| **Observability** | ✅ **Production-Ready** | Metrics, health, logging |
+| **Configuration** | ✅ **Production-Ready** | YAML + env vars |
+| **Scaling** | ✅ **Production-Ready** | Horizontal scaling supported |
+| **Database Config** | ⚠️ **Needs Work** | Currently YAML only |
+| **Kubernetes Deploy** | ⚠️ **Needs Work** | Manifests not yet created |
+| **Security Hardening** | ⚠️ **Needs Work** | TLS testing pending |
+
+**Overall Assessment**: The Protocol Gateway is **production-capable** for Phase 1 with the current YAML-based configuration. Database-driven configuration and Kubernetes manifests should be added for full enterprise deployment.
+
+---
+
+## 1️⃣4️⃣ Write Command Rate Limiting
+
+**Question:** How does the write command rate limiter work? Is it blocking? Is it configurable? Will it reduce incoming traffic?
+
+**Answer:** The rate limiter uses a **non-blocking semaphore pattern** that rejects excess commands immediately rather than queuing them.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    WRITE COMMAND RATE LIMITER                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Incoming Write Commands (MQTT)                                             │
+│              │                                                              │
+│              ▼                                                              │
+│  ┌──────────────────────────────────────────┐                               │
+│  │         Command Handler                  │                               │
+│  │                                          │                               │
+│  │  ┌────────────────────────────────────┐  │                               │
+│  │  │        Write Semaphore             │  │                               │
+│  │  │        ════════════════            │  │                               │
+│  │  │   [■■■■■■□□□□]  6/10 slots used    │  │                               │
+│  │  │                                    │  │                               │
+│  │  │   Slot available?                  │  │                               │
+│  │  │     YES ──► Acquire slot           │  │                               │
+│  │  │              Process write         │  │                               │
+│  │  │              Release slot          │  │                               │
+│  │  │                                    │  │                               │
+│  │  │     NO  ──► Reject immediately     │  │                               │
+│  │  │              Return error          │  │                               │
+│  │  │              "rate limit exceeded" │  │                               │
+│  │  └────────────────────────────────────┘  │                               │
+│  └──────────────────────────────────────────┘                               │
+│                     │                                                       │
+│            ┌────────┴────────┐                                              │
+│            ▼                 ▼                                              │
+│       Device Write     Error Response                                       │
+│       (success)        (rejected)                                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Behavior Details
+
+| Aspect | Behavior |
+|--------|----------|
+| **Blocking?** | ❌ **No** - Uses `select` with `default` case for immediate rejection |
+| **Queuing?** | ❌ **No** - Excess commands are NOT queued |
+| **Rejection** | ✅ Immediate error response to caller |
+| **Configurable?** | ✅ Yes - `MaxConcurrentWrites` in config |
+
+### Configuration
+
+```yaml
+# config/config.yaml
+commands:
+  max_concurrent_writes: 50    # Maximum concurrent device writes
+  write_timeout: 10s           # Timeout per write operation
+  enable_acknowledgement: true # Send response for each command
+```
+
+Or via code:
+
+```go
+config := service.CommandConfig{
+    MaxConcurrentWrites: 50,  // Limit concurrent writes
+    WriteTimeout:        10 * time.Second,
+}
+```
+
+### Does It Reduce Incoming Traffic?
+
+**No**, it doesn't reduce MQTT messages arriving at the gateway. Here's what it controls:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   MQTT Broker                    Protocol Gateway                           │
+│   ┌─────────┐                    ┌────────────────────────────────┐         │
+│   │         │  ───messages───>   │ Command Handler                │         │
+│   │  All    │  (all received)    │                                │         │
+│   │ messages│                    │   Rate Limiter                 │         │
+│   │ arrive  │                    │   ┌──────────────────┐         │         │
+│   │         │                    │   │ ■■■■■□□□□□       │         │         │
+│   │         │                    │   │                  │         │         │
+│   │         │                    │   │ Process │ Reject │         │         │
+│   └─────────┘                    │   └────┬────┴───┬────┘         │         │
+│                                  │        │        │              │         │
+│                                  └────────┼────────┼──────────────┘         │
+│                                           │        │                        │
+│                                           ▼        ▼                        │
+│                                     Device Write  Error                     │
+│                                                  Response                   │
+│                                                                             │
+│   What's controlled:                                                        │
+│   [Y] Concurrent writes to devices (prevents overwhelm)                     │
+│   [Y] Memory usage (no unbounded queue)                                     │
+│   [N] MQTT message arrival (broker controls this)                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Non-Blocking (Fail-Fast)?
+
+For industrial systems, non-blocking is preferred:
+
+| Non-Blocking (Current) | Blocking Alternative |
+|------------------------|---------------------|
+| ✅ Predictable latency | ⚠️ Latency increases under load |
+| ✅ Immediate feedback | ⚠️ Caller waits indefinitely |
+| ✅ No memory growth | ⚠️ Queue can grow unbounded |
+| ✅ Clear backpressure signal | ⚠️ Hidden delays |
+
+### Alternative: Blocking Mode
+
+If you prefer all commands to eventually process (at the cost of latency), the implementation could be changed to:
+
+```go
+// BLOCKING version - waits until slot available
+select {
+case h.writeSemaphore <- struct{}{}:
+    defer func() { <-h.writeSemaphore }()
+case <-h.ctx.Done():
+    return // Only exit on shutdown
+}
+// No default = blocks until slot is free
+```
+
+### Monitoring Rate Limiting
+
+The `CommandStats` tracks rejected commands:
+
+```go
+stats := commandHandler.GetStats()
+// stats["commands_rejected"] = number of rate-limited commands
+```
+
+Prometheus metric: `protocol_gateway_commands_rejected_total`
+
+### Summary
+
+| Question | Answer |
+|----------|--------|
+| **Is it blocking?** | ❌ No - immediate rejection |
+| **Is it configurable?** | ✅ Yes - `MaxConcurrentWrites` |
+| **Reduces incoming traffic?** | ❌ No - controls device writes, not MQTT |
+| **What gets rejected?** | Commands when all slots are in use |
+| **Response to rejection?** | Error: "rate limit exceeded, too many concurrent writes" |
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -1308,6 +2258,10 @@ func (cm *ConfigManager) handleConfigUpdate(msg mqtt.Message) {
 | **Code Architecture** | Many files = single binary. One container handles ALL devices and protocols |
 | **1000+ Devices** | Horizontal scaling - multiple gateway instances, NOT bigger pools |
 | **Device/Tag Config Flow** | Frontend → Gateway Core → PostgreSQL → Protocol Gateway (via MQTT notification) |
+| **Data Normalizer** | **Partially implemented** in adapters, extraction planned for Phase 2 |
+| **OPC UA Polling vs Subscriptions** | No conflict - one approach per device, polling used by default |
+| **Production Readiness** | **Production-capable** - core features ready, some enhancements planned |
+| **Write Rate Limiting** | Non-blocking semaphore, configurable limit (default 50), immediate rejection |
 
 ---
 

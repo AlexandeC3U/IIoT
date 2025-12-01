@@ -443,3 +443,11 @@ func (p *Publisher) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// Client returns the underlying MQTT client.
+// This is used by the command handler to subscribe to write commands.
+func (p *Publisher) Client() pahomqtt.Client {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.client
+}
+

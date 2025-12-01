@@ -12,25 +12,41 @@ import (
 
 // DeviceConfig represents the YAML structure for device configuration.
 type DeviceConfig struct {
-	ID          string            `yaml:"id"`
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description,omitempty"`
-	Protocol    string            `yaml:"protocol"`
-	Enabled     bool              `yaml:"enabled"`
-	UNSPrefix   string            `yaml:"uns_prefix"`
-	Connection  ConnectionConfig  `yaml:"connection"`
-	Tags        []TagConfig       `yaml:"tags"`
-	Metadata    map[string]string `yaml:"metadata,omitempty"`
+	ID           string            `yaml:"id"`
+	Name         string            `yaml:"name"`
+	Description  string            `yaml:"description,omitempty"`
+	Protocol     string            `yaml:"protocol"`
+	Enabled      bool              `yaml:"enabled"`
+	UNSPrefix    string            `yaml:"uns_prefix"`
+	PollInterval string            `yaml:"poll_interval,omitempty"`
+	Connection   ConnectionConfig  `yaml:"connection"`
+	Tags         []TagConfig       `yaml:"tags"`
+	Metadata     map[string]string `yaml:"metadata,omitempty"`
 }
 
 // ConnectionConfig represents connection settings in YAML.
 type ConnectionConfig struct {
+	// Common
 	Host       string `yaml:"host"`
 	Port       int    `yaml:"port"`
-	SlaveID    int    `yaml:"slave_id"`
 	Timeout    string `yaml:"timeout"`
 	RetryCount int    `yaml:"retry_count"`
 	RetryDelay string `yaml:"retry_delay"`
+
+	// Modbus
+	SlaveID int `yaml:"slave_id"`
+
+	// OPC UA
+	OPCEndpointURL    string `yaml:"opc_endpoint_url"`
+	OPCSecurityPolicy string `yaml:"opc_security_policy"`
+	OPCSecurityMode   string `yaml:"opc_security_mode"`
+	OPCAuthMode       string `yaml:"opc_auth_mode"`
+	OPCUsername       string `yaml:"opc_username"`
+	OPCPassword       string `yaml:"opc_password"`
+
+	// S7
+	S7Rack int `yaml:"s7_rack"`
+	S7Slot int `yaml:"s7_slot"`
 }
 
 // TagConfig represents a tag configuration in YAML.
@@ -38,12 +54,7 @@ type TagConfig struct {
 	ID            string            `yaml:"id"`
 	Name          string            `yaml:"name"`
 	Description   string            `yaml:"description,omitempty"`
-	Address       int               `yaml:"address"`
-	RegisterType  string            `yaml:"register_type"`
 	DataType      string            `yaml:"data_type"`
-	ByteOrder     string            `yaml:"byte_order,omitempty"`
-	RegisterCount int               `yaml:"register_count,omitempty"`
-	BitPosition   *int              `yaml:"bit_position,omitempty"`
 	ScaleFactor   float64           `yaml:"scale_factor,omitempty"`
 	Offset        float64           `yaml:"offset,omitempty"`
 	Unit          string            `yaml:"unit,omitempty"`
@@ -52,7 +63,21 @@ type TagConfig struct {
 	DeadbandType  string            `yaml:"deadband_type,omitempty"`
 	DeadbandValue float64           `yaml:"deadband_value,omitempty"`
 	Enabled       bool              `yaml:"enabled"`
+	AccessMode    string            `yaml:"access_mode,omitempty"`
 	Metadata      map[string]string `yaml:"metadata,omitempty"`
+
+	// Modbus-specific
+	Address       int    `yaml:"address,omitempty"`
+	RegisterType  string `yaml:"register_type,omitempty"`
+	ByteOrder     string `yaml:"byte_order,omitempty"`
+	RegisterCount int    `yaml:"register_count,omitempty"`
+	BitPosition   *int   `yaml:"bit_position,omitempty"`
+
+	// OPC UA-specific
+	OPCNodeID string `yaml:"opc_node_id,omitempty"`
+
+	// S7-specific
+	S7Address string `yaml:"s7_address,omitempty"`
 }
 
 // DevicesFile represents the top-level devices configuration file.
@@ -119,6 +144,13 @@ func convertDeviceConfig(dc DeviceConfig) (*domain.Device, error) {
 
 	// Parse poll interval (default 1 second)
 	pollInterval := 1 * time.Second
+	if dc.PollInterval != "" {
+		var err error
+		pollInterval, err = time.ParseDuration(dc.PollInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid poll interval: %w", err)
+		}
+	}
 
 	device := &domain.Device{
 		ID:           dc.ID,
@@ -131,12 +163,27 @@ func convertDeviceConfig(dc DeviceConfig) (*domain.Device, error) {
 		Tags:         tags,
 		Metadata:     dc.Metadata,
 		Connection: domain.ConnectionConfig{
+			// Common
 			Host:       dc.Connection.Host,
 			Port:       dc.Connection.Port,
-			SlaveID:    uint8(dc.Connection.SlaveID),
 			Timeout:    timeout,
 			RetryCount: dc.Connection.RetryCount,
 			RetryDelay: retryDelay,
+
+			// Modbus
+			SlaveID: uint8(dc.Connection.SlaveID),
+
+			// OPC UA
+			OPCEndpointURL:    dc.Connection.OPCEndpointURL,
+			OPCSecurityPolicy: dc.Connection.OPCSecurityPolicy,
+			OPCSecurityMode:   dc.Connection.OPCSecurityMode,
+			OPCAuthMode:       dc.Connection.OPCAuthMode,
+			OPCUsername:       dc.Connection.OPCUsername,
+			OPCPassword:       dc.Connection.OPCPassword,
+
+			// S7
+			S7Rack: dc.Connection.S7Rack,
+			S7Slot: dc.Connection.S7Slot,
 		},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -185,16 +232,17 @@ func convertTagConfig(tc TagConfig) (*domain.Tag, error) {
 		registerCount = 1
 	}
 
+	// Determine access mode
+	accessMode := domain.AccessMode(tc.AccessMode)
+	if accessMode == "" {
+		accessMode = domain.AccessModeReadOnly
+	}
+
 	tag := &domain.Tag{
 		ID:            tc.ID,
 		Name:          tc.Name,
 		Description:   tc.Description,
-		Address:       uint16(tc.Address),
-		RegisterType:  domain.RegisterType(tc.RegisterType),
 		DataType:      domain.DataType(tc.DataType),
-		ByteOrder:     byteOrder,
-		RegisterCount: registerCount,
-		BitPosition:   bitPosition,
 		ScaleFactor:   scaleFactor,
 		Offset:        tc.Offset,
 		Unit:          tc.Unit,
@@ -203,12 +251,21 @@ func convertTagConfig(tc TagConfig) (*domain.Tag, error) {
 		DeadbandType:  domain.DeadbandType(tc.DeadbandType),
 		DeadbandValue: tc.DeadbandValue,
 		Enabled:       tc.Enabled,
+		AccessMode:    accessMode,
 		Metadata:      tc.Metadata,
-	}
 
-	// Validate the tag
-	if err := tag.Validate(); err != nil {
-		return nil, err
+		// Modbus-specific
+		Address:       uint16(tc.Address),
+		RegisterType:  domain.RegisterType(tc.RegisterType),
+		ByteOrder:     byteOrder,
+		RegisterCount: registerCount,
+		BitPosition:   bitPosition,
+
+		// OPC UA-specific
+		OPCNodeID: tc.OPCNodeID,
+
+		// S7-specific
+		S7Address: tc.S7Address,
 	}
 
 	return tag, nil

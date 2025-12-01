@@ -15,26 +15,22 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ProtocolWriter is the interface for protocol-specific write operations.
-type ProtocolWriter interface {
-	WriteTag(ctx context.Context, device *domain.Device, tag *domain.Tag, value interface{}) error
-}
-
 // CommandHandler handles write commands received via MQTT.
 // It subscribes to command topics and routes write requests to the appropriate protocol driver.
+// Implements rate limiting via semaphore to prevent overwhelming devices.
 type CommandHandler struct {
-	mqttClient   mqtt.Client
-	modbusWriter ProtocolWriter
-	opcuaWriter  ProtocolWriter
-	devices      map[string]*domain.Device
-	devicesMu    sync.RWMutex
-	logger       zerolog.Logger
-	config       CommandConfig
-	stats        *CommandStats
-	running      atomic.Bool
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	mqttClient      mqtt.Client
+	protocolManager *domain.ProtocolManager
+	devices         map[string]*domain.Device
+	devicesMu       sync.RWMutex
+	logger          zerolog.Logger
+	config          CommandConfig
+	stats           *CommandStats
+	running         atomic.Bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	writeSemaphore  chan struct{} // Rate limiter for concurrent writes
 }
 
 // CommandConfig holds configuration for the command handler.
@@ -128,30 +124,38 @@ type WriteResponse struct {
 // NewCommandHandler creates a new command handler.
 func NewCommandHandler(
 	mqttClient mqtt.Client,
-	modbusWriter ProtocolWriter,
-	opcuaWriter ProtocolWriter,
+	protocolManager *domain.ProtocolManager,
 	devices []*domain.Device,
 	config CommandConfig,
 	logger zerolog.Logger,
 ) *CommandHandler {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Apply defaults
+	if config.MaxConcurrentWrites <= 0 {
+		config.MaxConcurrentWrites = 50
+	}
+
 	h := &CommandHandler{
-		mqttClient:   mqttClient,
-		modbusWriter: modbusWriter,
-		opcuaWriter:  opcuaWriter,
-		devices:      make(map[string]*domain.Device),
-		logger:       logger.With().Str("component", "command-handler").Logger(),
-		config:       config,
-		stats:        &CommandStats{},
-		ctx:          ctx,
-		cancel:       cancel,
+		mqttClient:      mqttClient,
+		protocolManager: protocolManager,
+		devices:         make(map[string]*domain.Device),
+		logger:          logger.With().Str("component", "command-handler").Logger(),
+		config:          config,
+		stats:           &CommandStats{},
+		ctx:             ctx,
+		cancel:          cancel,
+		writeSemaphore:  make(chan struct{}, config.MaxConcurrentWrites),
 	}
 
 	// Index devices by ID
 	for _, device := range devices {
 		h.devices[device.ID] = device
 	}
+
+	h.logger.Info().
+		Int("max_concurrent_writes", config.MaxConcurrentWrites).
+		Msg("Command handler initialized with rate limiting")
 
 	return h
 }
@@ -295,9 +299,28 @@ func (h *CommandHandler) handleTagWriteCommand(client mqtt.Client, msg mqtt.Mess
 	}()
 }
 
-// processWriteCommand processes a write command.
+// processWriteCommand processes a write command with rate limiting.
 func (h *CommandHandler) processWriteCommand(cmd WriteCommand) {
 	startTime := time.Now()
+
+	// Acquire write semaphore for rate limiting
+	select {
+	case h.writeSemaphore <- struct{}{}:
+		defer func() { <-h.writeSemaphore }()
+	case <-h.ctx.Done():
+		h.sendResponse(cmd, false, "service shutting down", time.Since(startTime))
+		h.stats.CommandsRejected.Add(1)
+		return
+	default:
+		// Semaphore full - too many concurrent writes
+		h.logger.Warn().
+			Str("device_id", cmd.DeviceID).
+			Str("tag_id", cmd.TagID).
+			Msg("Write command rejected: rate limit exceeded")
+		h.sendResponse(cmd, false, "rate limit exceeded, too many concurrent writes", time.Since(startTime))
+		h.stats.CommandsRejected.Add(1)
+		return
+	}
 
 	// Get device
 	h.devicesMu.RLock()
@@ -332,27 +355,11 @@ func (h *CommandHandler) processWriteCommand(cmd WriteCommand) {
 		return
 	}
 
-	// Execute write based on protocol
+	// Execute write using the protocol manager
 	ctx, cancel := context.WithTimeout(h.ctx, h.config.WriteTimeout)
 	defer cancel()
 
-	var err error
-	switch device.Protocol {
-	case domain.ProtocolModbusTCP, domain.ProtocolModbusRTU:
-		if h.modbusWriter != nil {
-			err = h.modbusWriter.WriteTag(ctx, device, tag, cmd.Value)
-		} else {
-			err = fmt.Errorf("modbus writer not available")
-		}
-	case domain.ProtocolOPCUA:
-		if h.opcuaWriter != nil {
-			err = h.opcuaWriter.WriteTag(ctx, device, tag, cmd.Value)
-		} else {
-			err = fmt.Errorf("opcua writer not available")
-		}
-	default:
-		err = fmt.Errorf("unsupported protocol: %s", device.Protocol)
-	}
+	err := h.protocolManager.WriteTag(ctx, device, tag, cmd.Value)
 
 	if err != nil {
 		h.logger.Error().

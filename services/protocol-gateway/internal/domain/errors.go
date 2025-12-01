@@ -70,6 +70,25 @@ var (
 	ErrOPCUAWriteNotPermitted   = errors.New("opcua: write not permitted")
 )
 
+// S7 (Siemens) specific errors.
+var (
+	ErrS7ConnectionFailed      = errors.New("s7: connection failed")
+	ErrS7InvalidAddress        = errors.New("s7: invalid address format")
+	ErrS7InvalidDBNumber       = errors.New("s7: invalid data block number")
+	ErrS7InvalidArea           = errors.New("s7: invalid memory area")
+	ErrS7InvalidOffset         = errors.New("s7: invalid offset")
+	ErrS7ReadFailed            = errors.New("s7: read operation failed")
+	ErrS7WriteFailed           = errors.New("s7: write operation failed")
+	ErrS7CPUError              = errors.New("s7: CPU error")
+	ErrS7PDUSizeMismatch       = errors.New("s7: PDU size mismatch")
+	ErrS7ItemNotAvailable      = errors.New("s7: item not available")
+	ErrS7AddressOutOfRange     = errors.New("s7: address out of range")
+	ErrS7WriteDataSizeMismatch = errors.New("s7: write data size mismatch")
+	ErrS7ObjectNotExist        = errors.New("s7: object does not exist")
+	ErrS7HardwareFault         = errors.New("s7: hardware fault")
+	ErrS7AccessingNotAllowed   = errors.New("s7: accessing not allowed")
+)
+
 // Write operation errors.
 var (
 	ErrTagNotWritable    = errors.New("tag is not writable")
@@ -79,12 +98,13 @@ var (
 
 // Service errors.
 var (
-	ErrServiceNotStarted = errors.New("service not started")
-	ErrServiceStopped    = errors.New("service has been stopped")
-	ErrDeviceNotFound    = errors.New("device not found")
-	ErrDeviceExists      = errors.New("device already exists")
-	ErrTagNotFound       = errors.New("tag not found")
-	ErrInvalidConfig     = errors.New("invalid configuration")
+	ErrServiceNotStarted    = errors.New("service not started")
+	ErrServiceStopped       = errors.New("service has been stopped")
+	ErrDeviceNotFound       = errors.New("device not found")
+	ErrDeviceExists         = errors.New("device already exists")
+	ErrTagNotFound          = errors.New("tag not found")
+	ErrInvalidConfig        = errors.New("invalid configuration")
+	ErrProtocolNotSupported = errors.New("protocol not supported")
 )
 
 // ModbusExceptionToError converts a Modbus exception code to a domain error.

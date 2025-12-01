@@ -28,6 +28,12 @@ type Config struct {
 	// Modbus configuration
 	Modbus ModbusConfig `mapstructure:"modbus"`
 
+	// OPC UA configuration
+	OPCUA OPCUAConfig `mapstructure:"opcua"`
+
+	// S7 configuration
+	S7 S7Config `mapstructure:"s7"`
+
 	// Polling configuration
 	Polling PollingConfig `mapstructure:"polling"`
 
@@ -64,6 +70,29 @@ type MQTTConfig struct {
 
 // ModbusConfig holds Modbus connection pool configuration.
 type ModbusConfig struct {
+	MaxConnections    int           `mapstructure:"max_connections"`
+	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
+	HealthCheckPeriod time.Duration `mapstructure:"health_check_period"`
+	ConnectionTimeout time.Duration `mapstructure:"connection_timeout"`
+	RetryAttempts     int           `mapstructure:"retry_attempts"`
+	RetryDelay        time.Duration `mapstructure:"retry_delay"`
+}
+
+// OPCUAConfig holds OPC UA connection pool configuration.
+type OPCUAConfig struct {
+	MaxConnections        int           `mapstructure:"max_connections"`
+	IdleTimeout           time.Duration `mapstructure:"idle_timeout"`
+	HealthCheckPeriod     time.Duration `mapstructure:"health_check_period"`
+	ConnectionTimeout     time.Duration `mapstructure:"connection_timeout"`
+	RetryAttempts         int           `mapstructure:"retry_attempts"`
+	RetryDelay            time.Duration `mapstructure:"retry_delay"`
+	DefaultSecurityPolicy string        `mapstructure:"default_security_policy"`
+	DefaultSecurityMode   string        `mapstructure:"default_security_mode"`
+	DefaultAuthMode       string        `mapstructure:"default_auth_mode"`
+}
+
+// S7Config holds S7 connection pool configuration.
+type S7Config struct {
 	MaxConnections    int           `mapstructure:"max_connections"`
 	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
 	HealthCheckPeriod time.Duration `mapstructure:"health_check_period"`
@@ -162,6 +191,25 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("modbus.connection_timeout", 10*time.Second)
 	v.SetDefault("modbus.retry_attempts", 3)
 	v.SetDefault("modbus.retry_delay", 100*time.Millisecond)
+
+	// OPC UA
+	v.SetDefault("opcua.max_connections", 50)
+	v.SetDefault("opcua.idle_timeout", 5*time.Minute)
+	v.SetDefault("opcua.health_check_period", 30*time.Second)
+	v.SetDefault("opcua.connection_timeout", 15*time.Second)
+	v.SetDefault("opcua.retry_attempts", 3)
+	v.SetDefault("opcua.retry_delay", 500*time.Millisecond)
+	v.SetDefault("opcua.default_security_policy", "None")
+	v.SetDefault("opcua.default_security_mode", "None")
+	v.SetDefault("opcua.default_auth_mode", "Anonymous")
+
+	// S7
+	v.SetDefault("s7.max_connections", 100)
+	v.SetDefault("s7.idle_timeout", 5*time.Minute)
+	v.SetDefault("s7.health_check_period", 30*time.Second)
+	v.SetDefault("s7.connection_timeout", 10*time.Second)
+	v.SetDefault("s7.retry_attempts", 3)
+	v.SetDefault("s7.retry_delay", 500*time.Millisecond)
 
 	// Polling
 	v.SetDefault("polling.worker_count", 10)
