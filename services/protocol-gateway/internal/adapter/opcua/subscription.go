@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gopcua/opcua"
-	"github.com/gopcua/opcua/monitor"
 	"github.com/gopcua/opcua/ua"
 	"github.com/nexus-edge/protocol-gateway/internal/domain"
 	"github.com/rs/zerolog"
@@ -20,7 +19,6 @@ import (
 // the server pushes data changes to the client (Report-by-Exception).
 type SubscriptionManager struct {
 	client          *Client
-	nodeMonitor     *monitor.NodeMonitor
 	subscriptions   map[string]*Subscription
 	mu              sync.RWMutex
 	logger          zerolog.Logger
@@ -38,8 +36,11 @@ type Subscription struct {
 	ID              uint32
 	Device          *domain.Device
 	Tags            map[string]*domain.Tag
+	TagList         []*domain.Tag // Ordered list for client handle lookup
 	MonitoredItems  map[string]uint32 // tag ID -> monitored item ID
 	LastValues      map[string]*domain.DataPoint
+	opcuaSub        *opcua.Subscription
+	notifyCh        chan *opcua.PublishNotificationData
 	mu              sync.RWMutex
 	publishInterval time.Duration
 	active          atomic.Bool
@@ -127,7 +128,7 @@ func (sm *SubscriptionManager) Stop() error {
 	// Unsubscribe from all
 	sm.mu.Lock()
 	for deviceID := range sm.subscriptions {
-		sm.unsubscribeDevice(deviceID)
+		_ = sm.unsubscribeDeviceLocked(deviceID)
 	}
 	sm.subscriptions = make(map[string]*Subscription)
 	sm.mu.Unlock()
@@ -150,20 +151,23 @@ func (sm *SubscriptionManager) Subscribe(device *domain.Device, tags []*domain.T
 	// Check if subscription already exists
 	if _, exists := sm.subscriptions[device.ID]; exists {
 		// Update existing subscription
-		return sm.updateSubscription(device, tags, config)
+		return sm.updateSubscriptionLocked(device, tags, config)
 	}
 
 	// Create new subscription
 	sub := &Subscription{
-		Device:         device,
-		Tags:           make(map[string]*domain.Tag),
-		MonitoredItems: make(map[string]uint32),
-		LastValues:     make(map[string]*domain.DataPoint),
+		Device:          device,
+		Tags:            make(map[string]*domain.Tag),
+		TagList:         make([]*domain.Tag, 0, len(tags)),
+		MonitoredItems:  make(map[string]uint32),
+		LastValues:      make(map[string]*domain.DataPoint),
+		notifyCh:        make(chan *opcua.PublishNotificationData, 100),
 		publishInterval: config.PublishInterval,
 	}
 
 	for _, tag := range tags {
 		sub.Tags[tag.ID] = tag
+		sub.TagList = append(sub.TagList, tag)
 	}
 
 	sm.subscriptions[device.ID] = sub
@@ -189,11 +193,11 @@ func (sm *SubscriptionManager) Unsubscribe(deviceID string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	return sm.unsubscribeDevice(deviceID)
+	return sm.unsubscribeDeviceLocked(deviceID)
 }
 
-// unsubscribeDevice removes a subscription (must hold lock).
-func (sm *SubscriptionManager) unsubscribeDevice(deviceID string) error {
+// unsubscribeDeviceLocked removes a subscription (must hold lock).
+func (sm *SubscriptionManager) unsubscribeDeviceLocked(deviceID string) error {
 	sub, exists := sm.subscriptions[deviceID]
 	if !exists {
 		return domain.ErrDeviceNotFound
@@ -201,8 +205,20 @@ func (sm *SubscriptionManager) unsubscribeDevice(deviceID string) error {
 
 	sub.active.Store(false)
 
-	// Note: The OPC UA client library handles cleanup when the client disconnects
-	// For now, we just mark the subscription as inactive
+	// Cancel the OPC UA subscription
+	if sub.opcuaSub != nil {
+		if err := sub.opcuaSub.Cancel(sm.ctx); err != nil {
+			sm.logger.Warn().
+				Err(err).
+				Str("device_id", deviceID).
+				Msg("Error cancelling OPC UA subscription")
+		}
+	}
+
+	// Close notification channel
+	if sub.notifyCh != nil {
+		close(sub.notifyCh)
+	}
 
 	delete(sm.subscriptions, deviceID)
 	sm.logger.Info().Str("device_id", deviceID).Msg("Removed subscription")
@@ -210,7 +226,7 @@ func (sm *SubscriptionManager) unsubscribeDevice(deviceID string) error {
 	return nil
 }
 
-// createOPCSubscription creates the actual OPC UA subscription.
+// createOPCSubscription creates the actual OPC UA subscription using the gopcua API.
 func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config SubscriptionConfig) error {
 	if !sm.client.IsConnected() {
 		return domain.ErrConnectionClosed
@@ -224,10 +240,25 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 		return domain.ErrConnectionClosed
 	}
 
-	// Build monitored item requests
-	itemsToCreate := make([]*ua.MonitoredItemCreateRequest, 0, len(sub.Tags))
+	// Create subscription parameters
+	params := &opcua.SubscriptionParameters{
+		Interval: config.PublishInterval,
+	}
 
-	for _, tag := range sub.Tags {
+	// Create subscription with notification channel
+	opcuaSub, err := client.Subscribe(sm.ctx, params, sub.notifyCh)
+	if err != nil {
+		return fmt.Errorf("%w: failed to create subscription: %v", domain.ErrOPCUASubscriptionFailed, err)
+	}
+
+	sub.opcuaSub = opcuaSub
+	sub.ID = opcuaSub.SubscriptionID
+
+	// Build monitored item requests using ua.MonitoredItemCreateRequest
+	monitoredItemRequests := make([]*ua.MonitoredItemCreateRequest, 0, len(sub.Tags))
+
+	clientHandle := uint32(0)
+	for _, tag := range sub.TagList {
 		nodeID, err := sm.client.getNodeID(tag.OPCNodeID)
 		if err != nil {
 			sm.logger.Warn().
@@ -238,7 +269,7 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 			continue
 		}
 
-		// Build monitored item request
+		// Create monitored item request
 		req := &ua.MonitoredItemCreateRequest{
 			ItemToMonitor: &ua.ReadValueID{
 				NodeID:       nodeID,
@@ -247,7 +278,7 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 			},
 			MonitoringMode: ua.MonitoringModeReporting,
 			RequestedParameters: &ua.MonitoringParameters{
-				ClientHandle:     uint32(len(itemsToCreate)),
+				ClientHandle:     clientHandle,
 				SamplingInterval: float64(config.SamplingInterval.Milliseconds()),
 				QueueSize:        config.QueueSize,
 				DiscardOldest:    config.DiscardOldest,
@@ -259,76 +290,62 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 			req.RequestedParameters.Filter = sm.createDeadbandFilter(config)
 		}
 
-		itemsToCreate = append(itemsToCreate, req)
+		monitoredItemRequests = append(monitoredItemRequests, req)
+		clientHandle++
 	}
 
-	if len(itemsToCreate) == 0 {
+	if len(monitoredItemRequests) == 0 {
+		// Cancel the subscription since we have no items to monitor
+		_ = opcuaSub.Cancel(sm.ctx)
 		return fmt.Errorf("no valid tags to monitor")
 	}
 
-	// Create subscription on server
-	notifyCh := make(chan *opcua.PublishNotificationData, 100)
-
-	subReq := &ua.CreateSubscriptionRequest{
-		RequestedPublishingInterval: float64(config.PublishInterval.Milliseconds()),
-		RequestedLifetimeCount:      60,
-		RequestedMaxKeepAliveCount:  20,
-		MaxNotificationsPerPublish:  1000,
-		PublishingEnabled:           true,
-		Priority:                    0,
-	}
-
-	subResp, err := client.Subscribe(sm.ctx, subReq, notifyCh)
+	// Add monitored items to the subscription using Monitor
+	res, err := opcuaSub.Monitor(sm.ctx, ua.TimestampsToReturnBoth, monitoredItemRequests...)
 	if err != nil {
-		return fmt.Errorf("%w: failed to create subscription: %v", domain.ErrOPCUASubscriptionFailed, err)
-	}
-
-	sub.ID = subResp.SubscriptionID
-
-	// Create monitored items
-	monItemReq := &ua.CreateMonitoredItemsRequest{
-		SubscriptionID:     sub.ID,
-		TimestampsToReturn: ua.TimestampsToReturnBoth,
-		ItemsToCreate:      itemsToCreate,
-	}
-
-	monItemResp, err := client.CreateMonitoredItems(sm.ctx, monItemReq)
-	if err != nil {
-		// Clean up subscription
-		client.DeleteSubscriptions(sm.ctx, &ua.DeleteSubscriptionsRequest{
-			SubscriptionIDs: []uint32{sub.ID},
-		})
+		_ = opcuaSub.Cancel(sm.ctx)
 		return fmt.Errorf("%w: failed to create monitored items: %v", domain.ErrOPCUASubscriptionFailed, err)
 	}
 
 	// Map monitored items to tags
-	tagList := make([]*domain.Tag, 0, len(sub.Tags))
-	for _, tag := range sub.Tags {
-		tagList = append(tagList, tag)
-	}
-
-	for i, result := range monItemResp.Results {
-		if result.StatusCode == ua.StatusOK && i < len(tagList) {
-			sub.mu.Lock()
-			sub.MonitoredItems[tagList[i].ID] = result.MonitoredItemID
-			sub.mu.Unlock()
-		} else if i < len(tagList) {
-			sm.logger.Warn().
-				Str("tag_id", tagList[i].ID).
-				Uint32("status", uint32(result.StatusCode)).
-				Msg("Failed to create monitored item")
+	// res is *ua.CreateMonitoredItemsResponse, Results is the slice
+	if res != nil && res.Results != nil {
+		for i, result := range res.Results {
+			if i >= len(sub.TagList) {
+				break
+			}
+			if result.StatusCode == ua.StatusOK {
+				sub.mu.Lock()
+				sub.MonitoredItems[sub.TagList[i].ID] = result.MonitoredItemID
+				sub.mu.Unlock()
+				sm.logger.Debug().
+					Str("tag_id", sub.TagList[i].ID).
+					Uint32("monitored_item_id", result.MonitoredItemID).
+					Msg("Created monitored item")
+			} else {
+				sm.logger.Warn().
+					Str("tag_id", sub.TagList[i].ID).
+					Uint32("status", uint32(result.StatusCode)).
+					Msg("Failed to create monitored item")
+			}
 		}
 	}
 
-	// Start notification handler
+	// Start notification handler goroutine
 	sm.wg.Add(1)
-	go sm.handleNotifications(sub, notifyCh, tagList)
+	go sm.handleNotifications(sub)
+
+	sm.logger.Info().
+		Str("device_id", sub.Device.ID).
+		Uint32("subscription_id", sub.ID).
+		Int("monitored_items", len(sub.MonitoredItems)).
+		Msg("OPC UA subscription created")
 
 	return nil
 }
 
-// handleNotifications processes incoming notifications from the subscription.
-func (sm *SubscriptionManager) handleNotifications(sub *Subscription, notifyCh <-chan *opcua.PublishNotificationData, tags []*domain.Tag) {
+// handleNotifications processes notifications from the subscription channel.
+func (sm *SubscriptionManager) handleNotifications(sub *Subscription) {
 	defer sm.wg.Done()
 
 	sm.logger.Debug().
@@ -340,7 +357,7 @@ func (sm *SubscriptionManager) handleNotifications(sub *Subscription, notifyCh <
 		select {
 		case <-sm.ctx.Done():
 			return
-		case notif, ok := <-notifyCh:
+		case notif, ok := <-sub.notifyCh:
 			if !ok {
 				sm.logger.Debug().
 					Str("device_id", sub.Device.ID).
@@ -352,13 +369,13 @@ func (sm *SubscriptionManager) handleNotifications(sub *Subscription, notifyCh <
 				continue
 			}
 
-			sm.processNotification(sub, notif, tags)
+			sm.processNotification(sub, notif)
 		}
 	}
 }
 
-// processNotification processes a single notification.
-func (sm *SubscriptionManager) processNotification(sub *Subscription, notif *opcua.PublishNotificationData, tags []*domain.Tag) {
+// processNotification processes a single publish notification.
+func (sm *SubscriptionManager) processNotification(sub *Subscription, notif *opcua.PublishNotificationData) {
 	if notif == nil || notif.Value == nil {
 		return
 	}
@@ -367,7 +384,7 @@ func (sm *SubscriptionManager) processNotification(sub *Subscription, notif *opc
 	switch n := notif.Value.(type) {
 	case *ua.DataChangeNotification:
 		for _, item := range n.MonitoredItems {
-			sm.processDataChange(sub, item, tags)
+			sm.processDataChange(sub, item)
 		}
 	case *ua.EventNotificationList:
 		// Handle events if needed in the future
@@ -375,24 +392,16 @@ func (sm *SubscriptionManager) processNotification(sub *Subscription, notif *opc
 	}
 }
 
-// processDataChange processes a single data change.
-func (sm *SubscriptionManager) processDataChange(sub *Subscription, item *ua.MonitoredItemNotification, tags []*domain.Tag) {
-	// Find the tag for this monitored item
-	var tag *domain.Tag
-	sub.mu.RLock()
-	for _, t := range tags {
-		if mid, exists := sub.MonitoredItems[t.ID]; exists && mid == item.ClientHandle {
-			tag = t
-			break
-		}
+// processDataChange processes a single data change notification.
+func (sm *SubscriptionManager) processDataChange(sub *Subscription, item *ua.MonitoredItemNotification) {
+	if item == nil || item.Value == nil {
+		return
 	}
-	sub.mu.RUnlock()
 
-	if tag == nil {
-		// Try to find by client handle index
-		if int(item.ClientHandle) < len(tags) {
-			tag = tags[item.ClientHandle]
-		}
+	// Find the tag for this monitored item by client handle
+	var tag *domain.Tag
+	if int(item.ClientHandle) < len(sub.TagList) {
+		tag = sub.TagList[item.ClientHandle]
 	}
 
 	if tag == nil {
@@ -417,30 +426,49 @@ func (sm *SubscriptionManager) processDataChange(sub *Subscription, item *ua.Mon
 	}
 
 	sm.client.stats.NotificationCount.Add(1)
+
+	sm.logger.Debug().
+		Str("tag_id", tag.ID).
+		Interface("value", dp.Value).
+		Msg("Processed data change notification")
 }
 
-// updateSubscription updates an existing subscription with new tags.
-func (sm *SubscriptionManager) updateSubscription(device *domain.Device, tags []*domain.Tag, config SubscriptionConfig) error {
-	sub := sm.subscriptions[device.ID]
-
-	// Find new and removed tags
-	newTags := make([]*domain.Tag, 0)
-	existingTagIDs := make(map[string]bool)
-
-	for _, tag := range tags {
-		existingTagIDs[tag.ID] = true
-		if _, exists := sub.Tags[tag.ID]; !exists {
-			newTags = append(newTags, tag)
-		}
+// updateSubscriptionLocked updates an existing subscription with new tags (must hold lock).
+func (sm *SubscriptionManager) updateSubscriptionLocked(device *domain.Device, tags []*domain.Tag, config SubscriptionConfig) error {
+	// For simplicity, recreate the subscription
+	// A more optimized implementation would add/remove individual monitored items
+	if err := sm.unsubscribeDeviceLocked(device.ID); err != nil && err != domain.ErrDeviceNotFound {
+		return err
 	}
 
-	// Note: For simplicity, we recreate the subscription
-	// A more optimized implementation would add/remove individual monitored items
-	sm.unsubscribeDevice(device.ID)
-	return sm.Subscribe(device, tags, config)
+	// Re-add to subscriptions map and create new subscription
+	sub := &Subscription{
+		Device:          device,
+		Tags:            make(map[string]*domain.Tag),
+		TagList:         make([]*domain.Tag, 0, len(tags)),
+		MonitoredItems:  make(map[string]uint32),
+		LastValues:      make(map[string]*domain.DataPoint),
+		notifyCh:        make(chan *opcua.PublishNotificationData, 100),
+		publishInterval: config.PublishInterval,
+	}
+
+	for _, tag := range tags {
+		sub.Tags[tag.ID] = tag
+		sub.TagList = append(sub.TagList, tag)
+	}
+
+	sm.subscriptions[device.ID] = sub
+
+	if err := sm.createOPCSubscription(sub, config); err != nil {
+		delete(sm.subscriptions, device.ID)
+		return err
+	}
+
+	sub.active.Store(true)
+	return nil
 }
 
-// createDeadbandFilter creates an OPC UA deadband filter.
+// createDeadbandFilter creates an OPC UA deadband filter extension object.
 func (sm *SubscriptionManager) createDeadbandFilter(config SubscriptionConfig) *ua.ExtensionObject {
 	var deadbandType uint32
 	switch config.DeadbandType {
@@ -460,7 +488,7 @@ func (sm *SubscriptionManager) createDeadbandFilter(config SubscriptionConfig) *
 
 	return &ua.ExtensionObject{
 		TypeID: &ua.ExpandedNodeID{
-			NodeID: ua.NewNumericNodeID(0, uint32(ua.DataChangeFilterType_Encoding_DefaultBinary)),
+			NodeID: ua.NewNumericNodeID(0, 724), // DataChangeFilter encoding
 		},
 		Value: filter,
 	}
@@ -492,6 +520,18 @@ func (sm *SubscriptionManager) GetLastValue(deviceID, tagID string) (*domain.Dat
 	return dp, exists
 }
 
+// GetAllSubscriptions returns all active subscriptions.
+func (sm *SubscriptionManager) GetAllSubscriptions() []*Subscription {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	subs := make([]*Subscription, 0, len(sm.subscriptions))
+	for _, sub := range sm.subscriptions {
+		subs = append(subs, sub)
+	}
+	return subs
+}
+
 // Stats returns subscription statistics.
 func (sm *SubscriptionManager) Stats() SubscriptionStats {
 	sm.mu.RLock()
@@ -499,6 +539,7 @@ func (sm *SubscriptionManager) Stats() SubscriptionStats {
 
 	stats := SubscriptionStats{
 		TotalSubscriptions: len(sm.subscriptions),
+		Running:            sm.running.Load(),
 	}
 
 	for _, sub := range sm.subscriptions {
@@ -518,5 +559,31 @@ type SubscriptionStats struct {
 	TotalSubscriptions  int
 	ActiveSubscriptions int
 	TotalMonitoredItems int
+	Running             bool
 }
 
+// IsActive returns whether a subscription is actively receiving data.
+func (s *Subscription) IsActive() bool {
+	return s.active.Load()
+}
+
+// GetLastValue returns the last received value for a tag.
+func (s *Subscription) GetLastValue(tagID string) (*domain.DataPoint, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	dp, exists := s.LastValues[tagID]
+	return dp, exists
+}
+
+// GetAllLastValues returns all last received values.
+func (s *Subscription) GetAllLastValues() map[string]*domain.DataPoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	values := make(map[string]*domain.DataPoint, len(s.LastValues))
+	for k, v := range s.LastValues {
+		values[k] = v
+	}
+	return values
+}

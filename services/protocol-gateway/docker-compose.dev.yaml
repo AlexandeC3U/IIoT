@@ -19,6 +19,7 @@ services:
       - EMQX_HOST=127.0.0.1
       - EMQX_DASHBOARD__DEFAULT_PASSWORD=admin123
       - EMQX_ALLOW_ANONYMOUS=true
+      - EMQX_AUTHORIZATION__NO_MATCH=allow
     volumes:
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
@@ -64,14 +65,8 @@ services:
     networks:
       - nexus-dev
 
-  # MQTT Explorer for debugging (optional - comment out if not needed)
-  mqtt-explorer:
-    image: smeagolworms4/mqtt-explorer:latest
-    container_name: nexus-mqtt-explorer
-    ports:
-      - "4000:4000"
-    networks:
-      - nexus-dev
+  # Note: Docker MQTT Explorer removed - use EMQX Dashboard WebSocket Client instead
+  # (http://localhost:18083 -> Diagnose -> WebSocket Client)
 
 volumes:
   emqx-data:

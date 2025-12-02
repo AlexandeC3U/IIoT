@@ -155,7 +155,6 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Configure security
 	secPolicy := c.getSecurityPolicy()
-	secMode := c.getSecurityMode()
 
 	if secPolicy != ua.SecurityPolicyURINone {
 		opts = append(opts, opcua.SecurityPolicy(secPolicy))
@@ -660,12 +659,9 @@ func (c *Client) processReadResult(result *ua.DataValue, tag *domain.Tag) *domai
 		quality,
 	).WithRawValue(value)
 
-	// Set timestamps from OPC UA
+	// Set source timestamp from OPC UA if available
 	if !result.SourceTimestamp.IsZero() {
-		dp.SourceTimestamp = result.SourceTimestamp
-	}
-	if !result.ServerTimestamp.IsZero() {
-		dp.ServerTimestamp = result.ServerTimestamp
+		dp.WithSourceTimestamp(result.SourceTimestamp)
 	}
 
 	return dp

@@ -129,27 +129,54 @@ The Dockerfile creates a minimal ~20MB Alpine Linux image with just the binary.
 
 ### Phase 2: MQTT Data Flow Test 📊
 
+**Recommended: EMQX Dashboard WebSocket Client**
+
+The built-in EMQX WebSocket client is the most reliable way to view messages:
+
 | Step | What to Check | How |
 |------|---------------|-----|
-| 1 | Open MQTT Explorer | http://localhost:4000 |
-| 2 | Connect to broker | Host: `localhost`, Port: `1883` |
-| 3 | Subscribe to `#` (all topics) | Click Subscribe |
-| 4 | Watch for messages | Should see topics like `uns/dev/simulator/plc001/test/register1` |
-| 5 | Check message format | JSON with `deviceId`, `tagId`, `value`, `timestamp`, `quality` |
+| 1 | Open EMQX Dashboard | http://localhost:18083 |
+| 2 | Login | Username: `admin`, Password: `admin123` |
+| 3 | Navigate to WebSocket Client | Menu: "Diagnose" → "WebSocket Client" |
+| 4 | Click "Connect" | Should show "Connected" |
+| 5 | Subscribe to topics | Topic: `dev/#`, then click "Subscribe" |
+| 6 | Watch for messages | Messages appear in the panel below |
 
-**Expected MQTT message:**
+> ⚠️ **Topic Format:** Topics are `{uns_prefix}/{topic_suffix}` (e.g., `dev/simulator/plc001/test/register1`)
+> 
+> Subscribe to `dev/#` to see all messages from the dev environment.
+
+**Alternative: Local MQTT Explorer (Desktop App)**
+
+| Step | What to Check | How |
+|------|---------------|-----|
+| 1 | Download & Install | http://mqtt-explorer.com |
+| 2 | Connect to broker | Host: `localhost`, Port: `1883` |
+| 3 | Topics auto-populate | Should see `dev/simulator/plc001/...` tree |
+| 4 | Check message format | JSON with `v`, `u`, `q`, `ts` fields |
+
+> ⚠️ **Note:** The Docker MQTT Explorer (port 4000) may have connectivity issues. Use EMQX Dashboard or the desktop app instead.
+
+**Expected MQTT message format (compact):**
 
 ```json
 {
-  "deviceId": "modbus-simulator-001",
-  "tagId": "test_register_1",
-  "topic": "uns/dev/simulator/plc001/test/register1",
-  "value": 0,
-  "unit": "units",
-  "quality": "good",
-  "timestamp": "2025-12-02T15:30:00Z"
+  "v": 0,
+  "u": "units",
+  "q": "good",
+  "ts": 1733165430000
 }
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `v` | Value |
+| `u` | Unit |
+| `q` | Quality (good, bad, uncertain) |
+| `ts` | Timestamp (Unix milliseconds) |
+
+**Topic format:** `{uns_prefix}/{topic_suffix}`
+Example: `dev/simulator/plc001/test/register1`
 
 ### Phase 3: EMQX Dashboard Verification 🖥️
 
@@ -230,9 +257,24 @@ docker-compose -f docker-compose.dev.yaml down
 | Problem | Check | Solution |
 |---------|-------|----------|
 | Gateway won't start | `docker logs nexus-protocol-gateway-dev` | Check error message |
-| No MQTT messages | MQTT Explorer connected? | Ensure connected to localhost:1883 |
+| No MQTT messages | Wrong topic? | Subscribe to `dev/#` not `uns/#` |
+| Docker MQTT Explorer won't connect | Known issue | Use EMQX Dashboard WebSocket Client instead |
 | "Connection refused" | Is EMQX running? | `docker ps` to check |
 | Build fails | Missing dependencies? | `go mod download` |
+| EMQX high CPU (600%+) | Many messages/sec | Normal under load, see note below |
+| "authorization_permission_denied" | ACL blocking `#` | Subscribe to `dev/#` instead |
+
+### EMQX High CPU Usage
+
+EMQX may show high CPU usage (e.g., 600%) during testing. This is because:
+- The gateway publishes 6 messages per second (6 tags × 1 poll/sec)
+- EMQX runs multiple Erlang schedulers (shows as high % on multi-core)
+- 600% = using 6 CPU cores, which is normal for Erlang/BEAM VM
+
+**To reduce CPU for testing:**
+1. Increase poll interval in `devices-dev.yaml` (e.g., `poll_interval: 5s`)
+2. Reduce number of tags being polled
+3. This is not an issue in production with proper resource allocation
 
 ---
 

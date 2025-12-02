@@ -450,9 +450,9 @@ func (p *Pool) GetStats() PoolStats {
 			DeviceID:       id,
 			Connected:      entry.client.IsConnected(),
 			LastUsed:       entry.lastUse,
-			ReadCount:      clientStats.ReadCount.Load(),
-			WriteCount:     clientStats.WriteCount.Load(),
-			ErrorCount:     clientStats.ErrorCount.Load(),
+			ReadCount:      clientStats["read_count"],
+			WriteCount:     clientStats["write_count"],
+			ErrorCount:     clientStats["error_count"],
 			BreakerState:   entry.breaker.State().String(),
 		})
 	}

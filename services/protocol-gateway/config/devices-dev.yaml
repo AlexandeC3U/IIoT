@@ -11,6 +11,7 @@ devices:
     protocol: modbus-tcp
     enabled: true
     uns_prefix: dev/simulator/plc001
+    poll_interval: 5s  # Poll every 5 seconds to reduce CPU load
     
     connection:
       host: modbus-simulator
