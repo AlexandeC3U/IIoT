@@ -38,7 +38,6 @@ docker-compose -f docker-compose.dev.yaml logs -f
 | `nexus-emqx-dev` | 1883, 18083 | MQTT Broker (Dashboard: http://localhost:18083) |
 | `nexus-modbus-sim` | 5020 | Modbus Simulator |
 | `nexus-protocol-gateway-dev` | 8080 | Your Gateway |
-| `nexus-mqtt-explorer` | 4000 | MQTT message viewer (http://localhost:4000) |
 
 ### Option B: Run Locally (Native Go)
 
@@ -155,7 +154,7 @@ The built-in EMQX WebSocket client is the most reliable way to view messages:
 | 3 | Topics auto-populate | Should see `dev/simulator/plc001/...` tree |
 | 4 | Check message format | JSON with `v`, `u`, `q`, `ts` fields |
 
-> ⚠️ **Note:** The Docker MQTT Explorer (port 4000) may have connectivity issues. Use EMQX Dashboard or the desktop app instead.
+> 💡 **Tip:** EMQX Dashboard WebSocket Client is recommended as it's built into the broker and always works.
 
 **Expected MQTT message format (compact):**
 
@@ -207,21 +206,57 @@ Example: `dev/simulator/plc001/test/register1`
 
 ### Phase 6: Write Command Test (Bidirectional) ✍️
 
-Use any MQTT client (MQTT Explorer, mosquitto_pub) to send a write command:
+Test writing values back to the Modbus simulator using EMQX Dashboard WebSocket Client:
 
-**Topic:** `uns/commands/modbus-simulator-001/test_register_1`
+**Step-by-Step:**
 
-**Payload:**
+| Step | Action | Details |
+|------|--------|---------|
+| 1 | Open EMQX Dashboard | http://localhost:18083 |
+| 2 | Login | `admin` / `admin123` |
+| 3 | Go to WebSocket Client | Menu: "Diagnose" → "WebSocket Client" |
+| 4 | Click "Connect" | Wait for "Connected" status |
+| 5 | Subscribe to responses | Topic: `$nexus/cmd/response/#`, click "Subscribe" |
+| 6 | Publish write command | See below |
+| 7 | Check response | Should see success message in subscriptions |
+| 8 | Verify value changed | Subscribe to `dev/#` and check the tag value |
+
+**Write Command (Method 1 - JSON):**
+
+| Field | Value |
+|-------|-------|
+| **Topic** | `$nexus/cmd/modbus-simulator-001/write` |
+| **Payload** | `{"tag_id": "test_register_1", "value": 42}` |
+
+**Write Command (Method 2 - Simple):**
+
+| Field | Value |
+|-------|-------|
+| **Topic** | `$nexus/cmd/modbus-simulator-001/test_register_1/set` |
+| **Payload** | `42` |
+
+**Expected Response** (on `$nexus/cmd/response/modbus-simulator-001/test_register_1`):
 
 ```json
 {
-  "command": "write",
-  "value": 12345,
-  "correlation_id": "test-001"
+  "request_id": "",
+  "device_id": "modbus-simulator-001",
+  "tag_id": "test_register_1",
+  "success": true,
+  "timestamp": "2025-12-02T21:30:00Z",
+  "duration_ms": 5000000
 }
 ```
 
-**Expected:** The gateway writes to the Modbus simulator (check logs).
+**Topic Reference:**
+
+| Purpose | Topic Pattern | Example |
+|---------|---------------|---------|
+| JSON write | `$nexus/cmd/{device_id}/write` | `$nexus/cmd/modbus-simulator-001/write` |
+| Simple write | `$nexus/cmd/{device_id}/{tag_id}/set` | `$nexus/cmd/modbus-simulator-001/test_register_1/set` |
+| Response | `$nexus/cmd/response/{device_id}/{tag_id}` | `$nexus/cmd/response/modbus-simulator-001/test_register_1` |
+
+> ⚠️ **Note:** Tags must have `access_mode: readwrite` in `devices-dev.yaml` to be writable. Input registers are read-only by Modbus protocol.
 
 ---
 
@@ -238,13 +273,11 @@ docker-compose -f docker-compose.dev.yaml up -d
 docker-compose -f docker-compose.dev.yaml logs -f
 
 # Check health
-curl http://localhost:8080/health
+Invoke-RestMethod http://localhost:8080/health
 
-# View MQTT messages
-# Open http://localhost:4000 in browser
-
-# View EMQX dashboard
+# View EMQX dashboard & MQTT messages
 # Open http://localhost:18083 (admin/admin123)
+# Go to: Diagnose → WebSocket Client → Connect → Subscribe to dev/#
 
 # Stop everything
 docker-compose -f docker-compose.dev.yaml down
@@ -258,11 +291,11 @@ docker-compose -f docker-compose.dev.yaml down
 |---------|-------|----------|
 | Gateway won't start | `docker logs nexus-protocol-gateway-dev` | Check error message |
 | No MQTT messages | Wrong topic? | Subscribe to `dev/#` not `uns/#` |
-| Docker MQTT Explorer won't connect | Known issue | Use EMQX Dashboard WebSocket Client instead |
 | "Connection refused" | Is EMQX running? | `docker ps` to check |
 | Build fails | Missing dependencies? | `go mod download` |
 | EMQX high CPU (600%+) | Many messages/sec | Normal under load, see note below |
 | "authorization_permission_denied" | ACL blocking `#` | Subscribe to `dev/#` instead |
+| Write command fails | Tag not writable? | Check `access_mode: readwrite` in devices-dev.yaml |
 
 ### EMQX High CPU Usage
 
@@ -290,10 +323,11 @@ Use this checklist to track your testing progress:
 - [ ] `/health/ready` returns 200 OK
 
 ### Phase 2: MQTT Data Flow
-- [ ] MQTT Explorer connected to broker
-- [ ] Messages appearing on UNS topics
-- [ ] Message format is correct JSON
-- [ ] Values updating at poll interval
+- [ ] EMQX WebSocket Client connected
+- [ ] Subscribed to `dev/#` topic
+- [ ] Messages appearing (e.g., `dev/simulator/plc001/test/register1`)
+- [ ] Message format is correct JSON (`v`, `u`, `q`, `ts`)
+- [ ] Values updating at poll interval (every 5 seconds)
 
 ### Phase 3: EMQX Dashboard
 - [ ] Dashboard accessible
@@ -312,9 +346,10 @@ Use this checklist to track your testing progress:
 - [ ] Gateway reconnects after EMQX restart
 
 ### Phase 6: Write Commands
-- [ ] Write command sent via MQTT
-- [ ] Gateway processed the command
-- [ ] Value written to simulator (check logs)
+- [ ] Subscribed to `$nexus/cmd/response/#` for responses
+- [ ] Write command published to `$nexus/cmd/modbus-simulator-001/write`
+- [ ] Response received with `"success": true`
+- [ ] Value changed on `dev/simulator/plc001/test/register1` topic
 
 ---
 

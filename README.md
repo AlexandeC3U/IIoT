@@ -1259,8 +1259,8 @@ open https://<EXTERNAL-IP>
 - [x] Core architecture design
 - [x] Protocol Gateway (Modbus, OPC UA) with **bidirectional communication**
 - [x] **Write support** via MQTT command topics
-- [ ] S7 Protocol driver
-- [ ] EMQX broker integration
+- [x] S7 Protocol driver
+- [x] EMQX broker integration
 - [ ] TimescaleDB historian
 - [ ] Basic React frontend
 - [ ] Device management UI
