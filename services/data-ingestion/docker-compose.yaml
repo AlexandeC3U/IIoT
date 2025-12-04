@@ -1,0 +1,96 @@
+# Data Ingestion Service - Production Docker Compose
+# ===================================================
+#
+# This file defines the Data Ingestion Service for production deployment.
+# It does NOT include dependencies (EMQX, TimescaleDB) - those should be
+# deployed separately or via the main infrastructure docker-compose.
+#
+# Usage:
+#   docker-compose up -d
+#   docker-compose logs -f
+#
+# Environment variables (required):
+#   - INGESTION_MQTT_BROKER_URL: MQTT broker URL (e.g., tcp://emqx:1883)
+#   - INGESTION_DB_HOST: TimescaleDB host
+#   - INGESTION_DB_PASSWORD: Database password
+#
+# Optional environment variables:
+#   - INGESTION_INSTANCE_ID: Unique instance identifier (for multi-instance)
+
+version: '3.8'
+
+services:
+  # ================================================
+  # Data Ingestion Service
+  # ================================================
+  data-ingestion:
+    image: nexus/data-ingestion:${VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus-data-ingestion
+    restart: unless-stopped
+    
+    ports:
+      - "${INGESTION_HTTP_PORT:-8080}:8080"
+    
+    environment:
+      # Service identification
+      - ENVIRONMENT=production
+      - INGESTION_MQTT_CLIENT_ID=data-ingestion-${INGESTION_INSTANCE_ID:-1}
+      
+      # MQTT Configuration (required)
+      - INGESTION_MQTT_BROKER_URL=${INGESTION_MQTT_BROKER_URL:?MQTT broker URL is required}
+      - MQTT_USERNAME=${MQTT_USERNAME:-}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      
+      # Database Configuration (required)
+      - INGESTION_DB_HOST=${INGESTION_DB_HOST:?Database host is required}
+      - INGESTION_DB_PORT=${INGESTION_DB_PORT:-5432}
+      - INGESTION_DB_NAME=${INGESTION_DB_NAME:-nexus_historian}
+      - INGESTION_DB_USER=${INGESTION_DB_USER:-nexus_ingestion}
+      - INGESTION_DB_PASSWORD=${INGESTION_DB_PASSWORD:?Database password is required}
+      
+      # Logging
+      - INGESTION_LOGGING_LEVEL=${INGESTION_LOGGING_LEVEL:-info}
+    
+    # Health checks
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=10M
+
+# ================================================
+# For multi-instance deployment, use docker-compose scale:
+#   docker-compose up -d --scale data-ingestion=3
+#
+# Each instance will automatically use shared subscriptions
+# to load balance messages from EMQX.
+# ================================================
+

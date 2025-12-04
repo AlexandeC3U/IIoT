@@ -23,7 +23,8 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 15. [Data Resilience: Buffering, Failures, and Recovery](#1️⃣5️⃣-data-resilience-buffering-failures-and-recovery)
 16. [Protocol Gateway: Best Practices and Performance](#1️⃣6️⃣-protocol-gateway-best-practices-and-performance)
 17. [Real-World Scaling: 1000 Devices Example](#1️⃣7️⃣-real-world-scaling-1000-devices-example)
-18. [Summary of Decisions](#summary-of-recommendations)
+18. [Data Ingestion Service: Architecture & Scaling](#1️⃣8️⃣-data-ingestion-service-architecture--scaling)
+19. [Summary of Decisions](#summary-of-recommendations)
 
 ---
 
@@ -3494,6 +3495,709 @@ Even though goroutines are cheap, we limit **concurrent network operations**:
 
 ---
 
+## 1️⃣8️⃣ Data Ingestion Service: Architecture & Scaling
+
+**Question:** How do we build the Data Ingestion Service to be production-ready? What about scaling with multiple instances, handling 40,000+ data points/second from 1000 devices, and ensuring no data loss?
+
+**Answer:** The Data Ingestion Service is designed for **high-throughput, horizontal scaling, and fault tolerance**.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    DATA INGESTION SERVICE (Production-Ready)                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    MQTT SUBSCRIBER                                  │    │
+│  │                                                                     │    │
+│  │   Subscribe: $share/ingestion/dev/#     ← Shared subscription!      │    │
+│  │              $share/ingestion/uns/#                                 │    │
+│  │                                                                     │    │
+│  │   • Connects to EMQX with QoS 1                                     │    │
+│  │   • Uses shared subscriptions for load balancing                    │    │
+│  │   • Parses JSON payload (DataPoint format)                          │    │
+│  │   • Pushes to internal channel (non-blocking)                       │    │
+│  │                                                                     │    │
+│  └────────────────────────────┬────────────────────────────────────────┘    │
+│                               │                                             │
+│                               ▼                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    BATCH ACCUMULATOR                                │    │
+│  │                                                                     │    │
+│  │   ┌──────────────────────────────────────────────────────────────┐  │    │
+│  │   │  Buffered Channel (capacity: 50,000 points)                  │  │    │
+│  │   │                                                              │  │    │
+│  │   │  Provides backpressure buffer for traffic spikes             │  │    │
+│  │   │  ~1.25 seconds of buffer at 40K points/sec                   │  │    │
+│  │   │                                                              │  │    │
+│  │   └──────────────────────────────────────────────────────────────┘  │    │
+│  │                               │                                     │    │
+│  │   Flush triggers:             ▼                                     │    │
+│  │   • 5,000 points accumulated   ┌──────────────┐                     │    │
+│  │   • 100ms timeout              │ Batch Ready! │                     │    │
+│  │   • Graceful shutdown          └──────┬───────┘                     │    │
+│  │                                       │                             │    │
+│  └───────────────────────────────────────┼─────────────────────────────┘    │
+│                                          │                                  │
+│                                          ▼                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                    PARALLEL WRITERS (4x)                            │    │
+│  │                                                                     │    │
+│  │   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │    │
+│  │   │  Writer 1   │  │  Writer 2   │  │  Writer 3   │  │  Writer 4 │  │    │
+│  │   │             │  │             │  │             │  │           │  │    │
+│  │   │ COPY proto  │  │ COPY proto  │  │ COPY proto  │  │ COPY proto│  │    │
+│  │   │ 5000 rows   │  │ 5000 rows   │  │ 5000 rows   │  │ 5000 rows │  │    │
+│  │   │ ~10ms       │  │ ~10ms       │  │ ~10ms       │  │ ~10ms     │  │    │
+│  │   └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │    │
+│  │          │                │                │               │        │    │
+│  │          └────────────────┴────────────────┴───────────────┘        │    │
+│  │                                   │                                 │    │
+│  └───────────────────────────────────┼─────────────────────────────────┘    │
+│                                      │                                      │
+│                                      ▼                                      │
+│                          ┌─────────────────────┐                            │
+│                          │    TIMESCALEDB      │                            │
+│                          │                     │                            │
+│                          │  pgxpool (10 conns) │                            │
+│                          │  COPY protocol      │                            │
+│                          │  metrics hypertable │                            │
+│                          └─────────────────────┘                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+#### 1. MQTT Shared Subscriptions for Horizontal Scaling
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    WHY SHARED SUBSCRIPTIONS?                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Normal Subscription (causes duplicates):                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  Topic: dev/plc-001/temperature                                     │    │
+│  │                                                                     │    │
+│  │  Instance 1: subscribe("dev/#") → receives message → writes to DB   │    │
+│  │  Instance 2: subscribe("dev/#") → receives message → writes to DB   │    │
+│  │                                                   ↑                 │    │
+│  │                                            DUPLICATE!               │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Shared Subscription (load balanced):                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  Topic: $share/ingestion/dev/#                                      │    │
+│  │         ^^^^^^^^^^^^^^^^                                            │    │
+│  │         Group name - EMQX load balances within group                │    │
+│  │                                                                     │    │
+│  │  Instance 1: receives messages A, C, E → writes to DB               │    │
+│  │  Instance 2: receives messages B, D, F → writes to DB               │    │
+│  │                                                                     │    │
+│  │  Result: Each message processed exactly once!                       │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Configuration:                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  mqtt:                                                              │    │
+│  │    topics:                                                          │    │
+│  │      - "$share/ingestion/dev/#"    # Device data                    │    │
+│  │      - "$share/ingestion/uns/#"    # UNS data                       │    │
+│  │    shared_subscription_group: ingestion                             │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 2. Batch Size Optimization for 40K Points/Second
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    THROUGHPUT CALCULATION                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Scenario: 1000 devices × 40 tags × 1Hz = 40,000 points/second              │
+│                                                                             │
+│  - Small batches (100 points):                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  40,000 ÷ 100 = 400 INSERTs per second                              │    │
+│  │  Each INSERT = ~2-5ms                                               │    │
+│  │  Total: 400 × 5ms = 2000ms per second = OVERLOADED!                 │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  + Optimized batches (5000 points + COPY protocol):                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  40,000 ÷ 5,000 = 8 COPY operations per second                      │    │
+│  │  Each COPY = ~10ms (COPY is 10-50x faster than INSERT)              │    │
+│  │  Total: 8 × 10ms = 80ms per second                                  │    │
+│  │                                                                     │    │
+│  │  With 4 parallel writers:                                           │    │
+│  │  Capacity = 4 × (1000ms ÷ 10ms) × 5000 = 2,000,000 points/second!   │    │
+│  │                                                                     │    │
+│  │  Our load: 40K/sec                                                  │    │
+│  │  Our capacity: 200K+/sec                                            │    │
+│  │  Headroom: 5x                                                       │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 3. PostgreSQL COPY Protocol vs INSERT
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    WHY COPY PROTOCOL?                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Standard INSERT:                                                           │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  INSERT INTO metrics (time, topic, value, quality)                  │    │
+│  │  VALUES                                                             │    │
+│  │    ('2024-01-15 10:00:00', 'dev/plc1/temp', 75.5, 192),             │    │
+│  │    ('2024-01-15 10:00:00', 'dev/plc1/pressure', 2.4, 192),          │    │
+│  │    ... (5000 rows)                                                  │    │
+│  │                                                                     │    │
+│  │  Time: ~50ms for 5000 rows                                          │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  COPY Protocol (binary stream):                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  COPY metrics (time, topic, value, quality) FROM STDIN              │    │
+│  │                                                                     │    │
+│  │  • Bypasses SQL parsing                                             │    │
+│  │  • Binary format (no text conversion)                               │    │
+│  │  • Minimal protocol overhead                                        │    │
+│  │  • Uses pgx CopyFrom() in Go                                        │    │
+│  │                                                                     │    │
+│  │  Time: ~5-10ms for 5000 rows (5-10x faster!)                        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Go implementation:                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  _, err := conn.CopyFrom(                                           │    │
+│  │      ctx,                                                           │    │
+│  │      pgx.Identifier{"metrics"},                                     │    │
+│  │      []string{"time", "topic", "value", "value_str", "quality"},    │    │
+│  │      pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {     │    │
+│  │          return []any{                                              │    │
+│  │              batch[i].Timestamp,                                    │    │
+│  │              batch[i].Topic,                                        │    │
+│  │              batch[i].Value,                                        │    │
+│  │              batch[i].ValueStr,                                     │    │
+│  │              batch[i].Quality,                                      │    │
+│  │          }, nil                                                     │    │
+│  │      }),                                                            │    │
+│  │  )                                                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deep Dive: INSERT vs COPY Protocol Explained
+
+**Why is database writing the bottleneck, and what's the difference between INSERT and COPY?**
+
+#### Understanding the Problem
+
+When you write data to a database, there's overhead for each operation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ANATOMY OF A DATABASE WRITE                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  What happens when you execute an INSERT:                                   │
+│                                                                             │
+│  1. NETWORK ROUND-TRIP                                                      │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  App → Send query → Network latency → DB receives               │     │
+│     │                                                    ~0.1-1ms     │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  2. SQL PARSING                                                             │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  DB parses "INSERT INTO metrics..." as text                     │     │
+│     │  Validates syntax, column names, types                          │     │
+│     │                                                    ~0.05ms      │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  3. QUERY PLANNING                                                          │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  DB creates execution plan                                      │     │
+│     │  Checks constraints, triggers                                   │     │
+│     │                                                    ~0.05ms      │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  4. DATA CONVERSION                                                         │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  Text "75.5" → Binary float64                                   │     │
+│     │  Text "2024-01-15..." → Binary timestamp                        │     │
+│     │                                                    ~0.01ms      │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  5. DISK WRITE (WAL)                                                        │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  Write to Write-Ahead Log for durability                        │     │
+│     │  fsync() to disk                                                │     │
+│     │                                                    ~0.5-2ms     │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  6. RESPONSE                                                                │
+│     ┌─────────────────────────────────────────────────────────────────┐     │
+│     │  DB → Send "INSERT 0 1" → Network → App receives                │     │
+│     │                                                    ~0.1-1ms     │     │
+│     └─────────────────────────────────────────────────────────────────┘     │
+│                                                                             │
+│  TOTAL per single INSERT: ~1-5ms                                            │
+│                                                                             │
+│  At 40,000 points/sec with 1 point per INSERT:                              │
+│  40,000 × 2ms = 80,000ms = 80 SECONDS of work per second!                   │
+│  IMPOSSIBLE - you can't do 80 seconds of work in 1 second.                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### The Batching Solution
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    BATCHING REDUCES OVERHEAD                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Instead of 40,000 individual INSERTs, batch them:                          │
+│                                                                             │
+│  Individual INSERTs (bad):                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  INSERT INTO metrics VALUES (ts1, topic1, 75.5);  -- 2ms            │    │
+│  │  INSERT INTO metrics VALUES (ts2, topic2, 80.1);  -- 2ms            │    │
+│  │  INSERT INTO metrics VALUES (ts3, topic3, 22.3);  -- 2ms            │    │
+│  │  ... × 40,000 times = 80,000ms                                      │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Batched INSERT (better):                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  INSERT INTO metrics VALUES                                         │    │
+│  │    (ts1, topic1, 75.5),                                             │    │
+│  │    (ts2, topic2, 80.1),                                             │    │
+│  │    (ts3, topic3, 22.3),                                             │    │
+│  │    ... × 5000 values;    -- ONE query with 5000 rows = ~50ms        │    │
+│  │                                                                     │    │
+│  │  40,000 ÷ 5,000 = 8 batched INSERTs × 50ms = 400ms                  │    │
+│  │  That's doable in 1 second!                                         │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Why batching helps:                                                        │
+│  • 1 network round-trip instead of 5,000                                    │
+│  • 1 SQL parse instead of 5,000                                             │
+│  • 1 query plan instead of 5,000                                            │
+│  • 1 transaction commit instead of 5,000                                    │
+│  • Amortize the ~2ms overhead across 5,000 rows                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### COPY Protocol: Even Better Than Batched INSERT
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    COPY vs BATCHED INSERT                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Even batched INSERT has overhead:                                          │
+│                                                                             │
+│  Batched INSERT (5000 rows):                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  1. Build huge SQL string:                                          │    │
+│  │     "INSERT INTO metrics VALUES (ts1, 'dev/plc/temp', 75.5), ..."   │    │
+│  │                                                                     │    │
+│  │  2. Send ~200KB of TEXT over the network                            │    │
+│  │                                                                     │    │
+│  │  3. PostgreSQL parses 200KB of SQL text                             │    │
+│  │                                                                     │    │
+│  │  4. Convert 5000 text values → binary:                              │    │
+│  │     "75.5" → 0x4097000000000000 (float64 bytes)                     │    │
+│  │     "2024-01-15T10:00:00Z" → 8-byte timestamp                       │    │
+│  │                                                                     │    │
+│  │  Time: ~50ms for 5000 rows                                          │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  COPY Protocol (5000 rows):                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  1. Send small command:                                             │    │
+│  │     "COPY metrics (time, topic, value) FROM STDIN (FORMAT binary)"  │    │
+│  │                                                                     │    │
+│  │  2. Stream BINARY data directly:                                    │    │
+│  │     [8 bytes: timestamp][length + bytes: topic][8 bytes: float64]   │    │
+│  │     No text conversion needed!                                      │    │
+│  │                                                                     │    │
+│  │  3. PostgreSQL receives pre-formatted binary data                   │    │
+│  │     Writes directly to table with minimal processing                │    │
+│  │                                                                     │    │
+│  │  Bypasses:                                                          │    │
+│  │  • SQL parsing (no SQL to parse!)                                   │    │
+│  │  • Text-to-binary conversion (already binary!)                      │    │
+│  │  • Query planning (fixed, simple operation)                         │    │
+│  │                                                                     │    │
+│  │  Time: ~5-10ms for 5000 rows (5-10x faster!)                        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Visual comparison:                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  Batched INSERT: ████████████████████████████████████████████ 50ms  │    │
+│  │  COPY Protocol:  ████████ 10ms                                      │    │
+│  │                                                                     │    │
+│  │  For 40K points/sec:                                                │    │
+│  │  Batched INSERT: 8 × 50ms = 400ms/sec (40% CPU time)                │    │
+│  │  COPY Protocol:  8 × 10ms = 80ms/sec  (8% CPU time)                 │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Why 5000 Points Per Batch? (The Sweet Spot)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FINDING THE OPTIMAL BATCH SIZE                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Batch size affects TWO things:                                             │
+│                                                                             │
+│  1. THROUGHPUT (bigger = better)                                            │
+│  2. LATENCY (bigger = worse)                                                │
+│                                                                             │
+│  The tradeoff:                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  Batch   │ Write Time │ Points/sec │ Max Latency │ Memory Usage     │    │
+│  │  Size    │ (per batch)│ Capacity   │ (worst case)│                  │    │
+│  │  ────────┼────────────┼────────────┼─────────────┼─────────────     │    │
+│  │  100     │ 2ms        │ 50,000     │ 2ms         │ ~10KB            │    │
+│  │  500     │ 4ms        │ 125,000    │ 4ms         │ ~50KB            │    │
+│  │  1,000   │ 5ms        │ 200,000    │ 5ms         │ ~100KB           │    │
+│  │  5,000   │ 10ms       │ 500,000    │ 100ms*      │ ~500KB           │    │
+│  │  10,000  │ 15ms       │ 666,000    │ 200ms*      │ ~1MB             │    │
+│  │  50,000  │ 50ms       │ 1,000,000  │ 1000ms*     │ ~5MB             │    │
+│  │                                                                     │    │
+│  │  * Includes flush_interval wait time (100ms default)                │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Why 5000 is the SWEET SPOT:                                                │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  - 10ms write time - fast enough for real-time                      │    │
+│  │  - 500K points/sec capacity - 12x our 40K need (headroom!)          │    │
+│  │  - ~100ms max latency - acceptable for industrial monitoring        │    │
+│  │  - ~500KB memory - negligible                                       │    │
+│  │  - PostgreSQL handles this size efficiently                         │    │
+│  │  - Matches TimescaleDB's internal chunk size well                   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  When to use DIFFERENT batch sizes:                                         │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  USE CASE                    │  RECOMMENDED BATCH SIZE              │    │
+│  │  ────────────────────────────┼───────────────────────────────────   │    │
+│  │  Real-time dashboards        │  100-500 (low latency)               │    │
+│  │  Industrial monitoring       │  1000-5000 (balanced)                │    │
+│  │  Historical data import      │  10000-50000 (max throughput)        │    │
+│  │  Log aggregation             │  5000-10000 (high volume)            │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### The Flush Interval (100ms)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    WHY ALSO FLUSH EVERY 100ms?                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Problem: What if data comes in slowly?                                     │
+│                                                                             │
+│  Scenario: Only 10 devices polling at 1Hz = 10 points/second                │
+│                                                                             │
+│  Without time-based flush:                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Wait for 5000 points...                                            │    │
+│  │  5000 ÷ 10 points/sec = 500 seconds = 8+ MINUTES!                   │    │
+│  │                                                                     │    │
+│  │  Your data sits in memory for 8 minutes before being written.       │    │
+│  │  If the service crashes, you lose 8 minutes of data!                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  With flush_interval: 100ms:                                                │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Flush when EITHER:                                                 │    │
+│  │  • Batch reaches 5000 points, OR                                    │    │
+│  │  • 100ms has passed since last flush                                │    │
+│  │                                                                     │    │
+│  │  At 10 points/sec:                                                  │    │
+│  │  • After 100ms, flush with ~1 point                                 │    │
+│  │  • Max data loss on crash: 100ms worth                              │    │
+│  │                                                                     │    │
+│  │  At 40,000 points/sec:                                              │    │
+│  │  • Batch fills to 5000 in 125ms                                     │    │
+│  │  • Flush triggered by batch size (before 100ms timeout)             │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  The 100ms flush_interval ensures:                                          │
+│  • Data is persisted within 100ms even at low throughput                    │
+│  • Maximum data loss on crash is ~100ms worth of data                       │
+│  • Small batches don't wait forever                                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Summary: The Complete Picture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    DATA INGESTION: PUTTING IT ALL TOGETHER                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  40,000 points/sec from Protocol Gateway                                    │
+│                           │                                                 │
+│                           ▼                                                 │
+│           ┌───────────────────────────────┐                                 │
+│           │  MQTT Subscriber              │                                 │
+│           │  (receives 40K msg/sec)       │                                 │
+│           └───────────────┬───────────────┘                                 │
+│                           │                                                 │
+│                           ▼                                                 │
+│           ┌───────────────────────────────┐                                 │
+│           │  Buffer (50,000 capacity)     │  ← Handles burst traffic        │
+│           │  Currently: ~4,000 points     │                                 │
+│           └───────────────┬───────────────┘                                 │
+│                           │                                                 │
+│                           ▼                                                 │
+│           ┌───────────────────────────────┐                                 │
+│           │  Batcher                      │                                 │
+│           │  Accumulates until:           │                                 │
+│           │  • 5,000 points (125ms), OR   │                                 │
+│           │  • 100ms timeout              │                                 │
+│           └───────────────┬───────────────┘                                 │
+│                           │                                                 │
+│           8 batches/sec   │   (40,000 ÷ 5,000 = 8)                          │
+│                           ▼                                                 │
+│           ┌───────────────────────────────┐                                 │
+│           │  4 Parallel Writers           │                                 │
+│           │                               │                                 │
+│           │  Each writer:                 │                                 │
+│           │  • Takes a 5000-point batch   │                                 │
+│           │  • COPY to TimescaleDB        │                                 │
+│           │  • ~10ms per batch            │                                 │
+│           │                               │                                 │
+│           │  Capacity: 4 × 100/sec = 400  │                                 │
+│           │  batches/sec = 2M points/sec  │                                 │
+│           └───────────────┬───────────────┘                                 │
+│                           │                                                 │
+│                           ▼                                                 │
+│           ┌───────────────────────────────┐                                 │
+│           │  TimescaleDB                  │                                 │
+│           │                               │                                 │
+│           │  Receives 8 COPY ops/sec      │                                 │
+│           │  Using only 4% of capacity    │                                 │
+│           └───────────────────────────────┘                                 │
+│                                                                             │
+│  Result: 40K points/sec with 25x headroom, <100ms latency                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### 4. Idempotency for Replay Safety
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    IDEMPOTENT WRITES                                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Problem: MQTT QoS 1 can deliver messages more than once (at-least-once)    │
+│                                                                             │
+│  Solution: Composite unique key + ON CONFLICT DO NOTHING                    │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  CREATE UNIQUE INDEX idx_metrics_idempotent                         │    │
+│  │      ON metrics (time, topic)                                       │    │
+│  │      WHERE time > NOW() - INTERVAL '1 day';  -- Only recent data    │    │
+│  │                                                                     │    │
+│  │  -- Or use TimescaleDB's built-in deduplication                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Alternative: Use message ID from payload                                   │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  {                                                                  │    │
+│  │    "id": "uuid-from-gateway",  // Protocol Gateway generates this   │    │
+│  │    "topic": "dev/plc-001/temp",                                     │    │
+│  │    "value": 75.5,                                                   │    │
+│  │    "timestamp": "2024-01-15T10:00:00.123Z"                          │    │
+│  │  }                                                                  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Scaling Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    HORIZONTAL SCALING                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Single Instance Capacity:                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  • Writers: 4 parallel                                              │    │
+│  │  • Throughput: ~200,000 points/second                               │    │
+│  │  • Memory: ~128 MB                                                  │    │
+│  │  • CPU: ~0.5 core under load                                        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Recommended Scaling:                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │                                                                     │    │
+│  │  Points/Second     │  Instances  │  Notes                           │    │
+│  │  ──────────────────┼─────────────┼───────────────────────────────   │    │
+│  │  0 - 50,000        │     1       │  Single instance sufficient      │    │
+│  │  50,000 - 150,000  │     2       │  Shared subs load balance        │    │
+│  │  150,000 - 300,000 │     3       │  Linear scaling                  │    │
+│  │  300,000+          │    4+       │  Add instances as needed         │    │
+│  │                                                                     │    │
+│  │  Scaling formula:                                                   │    │
+│  │  instances = ceil(points_per_second / 150,000)                      │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  For 1000 devices (40K points/sec):                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  ┌───────────────────┐                                              │    │
+│  │  │ Data Ingestion    │  Single instance handles it easily           │    │
+│  │  │ (1 instance)      │  with 5x headroom                            │    │
+│  │  │                   │                                              │    │
+│  │  │ 40K pts/sec       │  Add second instance for redundancy,         │    │
+│  │  │ using only 20%    │  not for capacity                            │    │
+│  │  │ of capacity       │                                              │    │
+│  │  └─────────┬─────────┘                                              │    │
+│  │            │                                                        │    │
+│  │            ▼                                                        │    │
+│  │  ┌───────────────────┐                                              │    │
+│  │  │    TimescaleDB    │                                              │    │
+│  │  │    (1 instance)   │                                              │    │
+│  │  └───────────────────┘                                              │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration Reference
+
+```yaml
+# config/config.yaml
+service:
+  name: data-ingestion
+  environment: production
+
+http:
+  port: 8080
+  read_timeout: 10s
+  write_timeout: 10s
+
+mqtt:
+  broker_url: tcp://emqx:1883
+  client_id: data-ingestion-${HOSTNAME}
+  topics:
+    - "$share/ingestion/dev/#"
+    - "$share/ingestion/uns/#"
+  qos: 1
+  keep_alive: 30s
+  clean_session: false        # Persistent session for durability
+  reconnect_delay: 5s
+
+database:
+  host: timescaledb
+  port: 5432
+  database: nexus_historian
+  user: nexus_ingestion
+  password: ${DB_PASSWORD}
+  pool_size: 10               # Connection pool size
+  max_idle_time: 5m
+
+ingestion:
+  buffer_size: 50000          # Points in memory buffer
+  batch_size: 5000            # Points per write batch
+  flush_interval: 100ms       # Max time between flushes
+  writer_count: 4             # Parallel writer goroutines
+  use_copy_protocol: true     # Use COPY instead of INSERT
+
+logging:
+  level: info
+  format: json
+```
+
+### Observability
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    METRICS & HEALTH                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Prometheus Metrics:                                                        │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  # Points ingested                                                  │    │
+│  │  data_ingestion_points_total{topic="dev"}                           │    │
+│  │                                                                     │    │
+│  │  # Batch write duration                                             │    │
+│  │  data_ingestion_batch_duration_seconds{quantile="0.99"}             │    │
+│  │                                                                     │    │
+│  │  # Buffer utilization                                               │    │
+│  │  data_ingestion_buffer_usage{} (current / max)                      │    │
+│  │                                                                     │    │
+│  │  # Errors                                                           │    │
+│  │  data_ingestion_errors_total{type="parse|write|connection"}         │    │
+│  │                                                                     │    │
+│  │  # Lag (time since oldest point in buffer)                          │    │
+│  │  data_ingestion_lag_seconds{}                                       │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Health Endpoints:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  GET /health/live    → 200 if process running                       │    │
+│  │  GET /health/ready   → 200 if MQTT + DB connected                   │    │
+│  │  GET /status         → JSON with detailed stats                     │    │
+│  │  GET /metrics        → Prometheus format                            │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Summary
+
+| Aspect | Design Choice | Why |
+|--------|--------------|-----|
+| **MQTT Subscription** | `$share/ingestion/topic` | Load balancing, no duplicates across instances |
+| **Batch Size** | 5,000 points | Optimal for COPY protocol performance |
+| **Flush Interval** | 100ms | Low latency while maintaining efficiency |
+| **Write Protocol** | PostgreSQL COPY | 10-50x faster than INSERT |
+| **Writers** | 4 parallel goroutines | 200K+ points/sec capacity |
+| **Buffer Size** | 50,000 points | 1.25 sec backpressure buffer |
+| **Connection Pool** | pgxpool (10 connections) | Efficient connection reuse |
+| **Idempotency** | topic + timestamp unique | Safe message replay |
+
+**Bottom line:** A single Data Ingestion instance can handle 200K+ points/second. For 1000 devices (~40K points/sec), one instance with 5x headroom is sufficient. Deploy 2 instances for redundancy, not capacity.
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -3515,6 +4219,7 @@ Even though goroutines are cheap, we limit **concurrent network operations**:
 | **Data Resilience** | Multi-layer buffering (Gateway + EMQX + Consumer), QoS 1/2, EMQX clustering |
 | **Best Practices** | Core patterns implemented; deadband, adaptive polling, edge aggregation planned |
 | **1000 Devices Example** | Goroutines NOT a bottleneck; 3-5 instances recommended for fault isolation |
+| **Data Ingestion Service** | COPY protocol, 5K batches, shared subscriptions, 200K+ pts/sec capacity |
 
 ---
 

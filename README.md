@@ -129,56 +129,64 @@ nexus-edge/
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
-│   ├── 📂 protocol-gateway/              # Industrial protocol conversion (Go)
+│   ├── 📂 protocol-gateway/              # Industrial protocol conversion (Go) ✅
 │   │   ├── cmd/
 │   │   │   └── gateway/
 │   │   │       └── main.go               # Application entrypoint
 │   │   ├── internal/
-│   │   │   ├── protocols/
-│   │   │   │   ├── s7/                   # Siemens S7 driver (gos7)
-│   │   │   │   │   ├── client.go
-│   │   │   │   │   ├── types.go
-│   │   │   │   │   └── poller.go
-│   │   │   │   ├── opcua/                # OPC UA client (gopcua)
-│   │   │   │   │   ├── client.go
-│   │   │   │   │   ├── browser.go        # Tag discovery
-│   │   │   │   │   └── subscription.go
+│   │   │   ├── adapter/                  # Protocol adapters
 │   │   │   │   ├── modbus/               # Modbus TCP/RTU (go-modbus)
 │   │   │   │   │   ├── client.go
-│   │   │   │   │   ├── poller.go
-│   │   │   │   │   └── types.go
-│   │   │   │   └── mqtt/                 # Native MQTT passthrough
-│   │   │   │       └── bridge.go
-│   │   │   ├── core/
-│   │   │   │   ├── device_manager.go     # Device lifecycle
-│   │   │   │   ├── tag_registry.go       # Unified tag namespace
-│   │   │   │   ├── normalizer.go         # Value scaling, units
-│   │   │   │   └── publisher.go          # Publish to EMQX
-│   │   │   └── discovery/
-│   │   │       ├── scanner.go            # Subnet scanning
-│   │   │       ├── opcua_discovery.go    # OPC UA server discovery
-│   │   │       └── s7_discovery.go       # S7 device detection
+│   │   │   │   │   └── pool.go
+│   │   │   │   ├── opcua/                # OPC UA client (gopcua)
+│   │   │   │   │   ├── client.go
+│   │   │   │   │   ├── pool.go
+│   │   │   │   │   └── subscription.go
+│   │   │   │   ├── s7/                   # Siemens S7 driver (gos7)
+│   │   │   │   │   ├── client.go
+│   │   │   │   │   └── pool.go
+│   │   │   │   ├── mqtt/
+│   │   │   │   │   └── publisher.go      # MQTT publishing
+│   │   │   │   └── config/
+│   │   │   │       ├── config.go
+│   │   │   │       └── devices.go
+│   │   │   ├── domain/                   # Core business entities
+│   │   │   │   ├── device.go
+│   │   │   │   ├── tag.go
+│   │   │   │   ├── datapoint.go
+│   │   │   │   └── protocol.go
+│   │   │   ├── service/
+│   │   │   │   ├── polling.go            # Polling orchestration
+│   │   │   │   └── command_handler.go    # Write command handling
+│   │   │   ├── health/
+│   │   │   │   └── checker.go
+│   │   │   └── metrics/
+│   │   │       └── registry.go
 │   │   ├── Dockerfile
 │   │   ├── go.mod
 │   │   └── go.sum
 │   │
-│   ├── 📂 historian-service/             # Time-series data management (Go)
+│   ├── 📂 data-ingestion/                # MQTT to TimescaleDB ingestion (Go) ✅
 │   │   ├── cmd/
-│   │   │   └── historian/
+│   │   │   └── ingestion/
 │   │   │       └── main.go               # Application entrypoint
 │   │   ├── internal/
-│   │   │   ├── ingest/
-│   │   │   │   ├── consumer.go           # Subscribe to EMQX topics
-│   │   │   │   ├── batch_writer.go       # Optimized bulk inserts (pgx COPY)
-│   │   │   │   └── validator.go
-│   │   │   ├── query/
-│   │   │   │   ├── engine.go             # Time-range queries
-│   │   │   │   ├── aggregation.go        # Rollups, downsampling
-│   │   │   │   └── export.go             # CSV, Parquet export
-│   │   │   └── retention/
-│   │   │       ├── policy.go
-│   │   │       └── compression.go
-│   │   ├── migrations/                   # Database migrations (golang-migrate)
+│   │   │   ├── adapter/
+│   │   │   │   ├── mqtt/
+│   │   │   │   │   └── subscriber.go     # Shared subscription handler
+│   │   │   │   ├── timescaledb/
+│   │   │   │   │   └── writer.go         # COPY protocol batch writer
+│   │   │   │   └── config/
+│   │   │   │       └── config.go
+│   │   │   ├── domain/
+│   │   │   │   └── datapoint.go
+│   │   │   ├── service/
+│   │   │   │   ├── ingestion.go          # Ingestion orchestration
+│   │   │   │   └── batcher.go            # Batch accumulation
+│   │   │   ├── health/
+│   │   │   │   └── checker.go
+│   │   │   └── metrics/
+│   │   │       └── registry.go
 │   │   ├── Dockerfile
 │   │   ├── go.mod
 │   │   └── go.sum
@@ -1235,9 +1243,9 @@ open https://<EXTERNAL-IP>
 | | gos7 | Siemens S7 protocol |
 | | gopcua | OPC UA client |
 | | go-modbus | Modbus TCP/RTU |
-| **Historian Service** | **Go** | High-throughput data ingestion |
-| | pgx | PostgreSQL driver (COPY protocol) |
-| | paho.mqtt.golang | MQTT client |
+| **Data Ingestion** | **Go** | High-throughput MQTT → TimescaleDB |
+| | pgx (COPY) | 200K+ points/sec batch writes |
+| | paho.mqtt.golang | Shared subscriptions for scaling |
 | **Alert Service** | **Go** | Real-time rule evaluation |
 | **Orchestrator** | **Go** | Container/K8s management |
 | | docker/docker | Docker API client |
@@ -1257,11 +1265,12 @@ open https://<EXTERNAL-IP>
 
 ### Phase 1: Foundation (Current)
 - [x] Core architecture design
-- [x] Protocol Gateway (Modbus, OPC UA) with **bidirectional communication**
+- [x] Protocol Gateway (Modbus, OPC UA, S7) with **bidirectional communication**
 - [x] **Write support** via MQTT command topics
-- [x] S7 Protocol driver
+- [x] Connection pooling with circuit breakers
 - [x] EMQX broker integration
-- [ ] TimescaleDB historian
+- [x] **Data Ingestion Service** (MQTT → TimescaleDB)
+- [x] TimescaleDB schema with continuous aggregates
 - [ ] Basic React frontend
 - [ ] Device management UI
 - [ ] Container management (Docker)

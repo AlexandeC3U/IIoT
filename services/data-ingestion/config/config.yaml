@@ -1,0 +1,66 @@
+# Data Ingestion Service Configuration
+# =====================================
+
+service:
+  name: data-ingestion
+  environment: ${ENVIRONMENT:development}
+
+http:
+  port: 8080
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+mqtt:
+  # MQTT broker connection
+  broker_url: ${INGESTION_MQTT_BROKER_URL:tcp://localhost:1883}
+  client_id: ${INGESTION_MQTT_CLIENT_ID:data-ingestion-1}
+  username: ${MQTT_USERNAME:}
+  password: ${MQTT_PASSWORD:}
+  
+  # Shared subscriptions for load balancing across multiple instances
+  # The $share/group/ prefix ensures each message is delivered to only ONE instance
+  topics:
+    - "$share/ingestion/dev/#"
+    - "$share/ingestion/uns/#"
+  
+  qos: 1                    # At-least-once delivery
+  keep_alive: 30s
+  clean_session: false      # Persistent session for durability
+  reconnect_delay: 5s
+
+database:
+  # TimescaleDB connection
+  host: ${INGESTION_DB_HOST:localhost}
+  port: ${INGESTION_DB_PORT:5432}
+  database: ${INGESTION_DB_NAME:nexus_historian}
+  user: ${INGESTION_DB_USER:nexus_ingestion}
+  password: ${INGESTION_DB_PASSWORD:}
+  pool_size: 10             # Connection pool size
+  max_idle_time: 5m
+
+ingestion:
+  # Buffer for incoming data points
+  # Provides backpressure during traffic spikes
+  # 50000 points @ 40K/sec = ~1.25 seconds buffer
+  buffer_size: 50000
+  
+  # Batch size for database writes
+  # Larger batches = more efficient COPY, but higher latency
+  batch_size: 5000
+  
+  # Maximum time between flushes
+  # Even if batch isn't full, flush after this interval
+  flush_interval: 100ms
+  
+  # Number of parallel writer goroutines
+  # Each writer maintains its own DB connection
+  writer_count: 4
+  
+  # Use PostgreSQL COPY protocol (10-50x faster than INSERT)
+  use_copy_protocol: true
+
+logging:
+  level: ${INGESTION_LOGGING_LEVEL:info}
+  format: json              # json or console
+

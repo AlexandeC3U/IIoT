@@ -1,0 +1,143 @@
+# Data Ingestion Service - Development Docker Compose
+# ====================================================
+#
+# This file starts the Data Ingestion Service with all dependencies
+# for local development and testing.
+#
+# Usage:
+#   docker-compose -f docker-compose.dev.yaml up -d
+#   docker-compose -f docker-compose.dev.yaml logs -f data-ingestion
+#
+# Endpoints:
+#   - Data Ingestion API: http://localhost:8081
+#   - TimescaleDB: localhost:5432
+#   - EMQX Dashboard: http://localhost:18083 (admin/public)
+
+version: '3.8'
+
+services:
+  # ================================================
+  # EMQX MQTT Broker
+  # ================================================
+  emqx:
+    image: emqx/emqx:5.3.0
+    container_name: nexus-emqx-ingestion
+    ports:
+      - "1883:1883"     # MQTT
+      - "8083:8083"     # MQTT over WebSocket
+      - "18083:18083"   # Dashboard
+    environment:
+      - EMQX_NAME=nexus-emqx
+      - EMQX_HOST=0.0.0.0
+      - EMQX_ALLOW_ANONYMOUS=true
+      - EMQX_AUTHORIZATION__NO_MATCH=allow
+      - EMQX_AUTHORIZATION__CACHE__ENABLE=false
+    volumes:
+      - emqx_data:/opt/emqx/data
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # ================================================
+  # TimescaleDB (Historian Database)
+  # ================================================
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: nexus-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=nexus_historian
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ../../config/timescaledb/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./init-user.sql:/docker-entrypoint-initdb.d/02-init-user.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexus_historian"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # ================================================
+  # Data Ingestion Service
+  # ================================================
+  data-ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexus-data-ingestion
+    ports:
+      - "8081:8080"
+    environment:
+      - ENVIRONMENT=development
+      - INGESTION_MQTT_BROKER_URL=tcp://emqx:1883
+      - INGESTION_MQTT_CLIENT_ID=data-ingestion-dev
+      - INGESTION_DB_HOST=timescaledb
+      - INGESTION_DB_PORT=5432
+      - INGESTION_DB_NAME=nexus_historian
+      - INGESTION_DB_USER=nexus_ingestion
+      - INGESTION_DB_PASSWORD=ingestion_password
+      - INGESTION_LOGGING_LEVEL=debug
+    depends_on:
+      emqx:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - nexus-network
+
+  # ================================================
+  # Protocol Gateway (for testing data flow)
+  # ================================================
+  protocol-gateway:
+    build:
+      context: ../protocol-gateway
+      dockerfile: Dockerfile
+    container_name: nexus-protocol-gateway-ingestion
+    ports:
+      - "8082:8080"
+    environment:
+      - GATEWAY_MQTT_BROKER_URL=tcp://emqx:1883
+      - GATEWAY_HTTP_PORT=8080
+      - GATEWAY_LOGGING_LEVEL=info
+      - DEVICES_CONFIG_PATH=/app/config/devices-dev.yaml
+    volumes:
+      - ../protocol-gateway/config:/app/config:ro
+    depends_on:
+      emqx:
+        condition: service_healthy
+    networks:
+      - nexus-network
+
+  # ================================================
+  # Modbus Simulator (for testing)
+  # ================================================
+  modbus-simulator:
+    image: oitc/modbus-server:latest
+    container_name: nexus-modbus-simulator-ingestion
+    ports:
+      - "5020:5020"
+    networks:
+      - nexus-network
+
+networks:
+  nexus-network:
+    driver: bridge
+
+volumes:
+  emqx_data:
+  timescale_data:
+

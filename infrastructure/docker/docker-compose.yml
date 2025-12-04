@@ -280,43 +280,37 @@ services:
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Historian Service (Go)
-  # High-throughput data ingestion using pgx COPY protocol
+  # Data Ingestion Service (Go)
+  # High-throughput MQTT to TimescaleDB ingestion using pgx COPY protocol
   # ─────────────────────────────────────────────────────────────────────────────
-  historian-service:
+  data-ingestion:
     build:
-      context: ../../services/historian-service
+      context: ../../services/data-ingestion
       dockerfile: Dockerfile
-    image: nexus/historian-service:${VERSION:-latest}
-    container_name: nexus-historian-service
-    hostname: historian-service
+    image: nexus/data-ingestion:${VERSION:-latest}
+    container_name: nexus-data-ingestion
+    hostname: data-ingestion
     restart: unless-stopped
     environment:
-      - NEXUS_ENV=${NEXUS_ENV:-production}
-      - NEXUS_PORT=7000
-      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
-      # MQTT connection for data ingestion
-      - NEXUS_MQTT_BROKER=tcp://emqx:1883
-      - NEXUS_MQTT_USERNAME=${MQTT_HISTORIAN_USER:-historian}
-      - NEXUS_MQTT_PASSWORD=${MQTT_HISTORIAN_PASS:-historian_secret}
-      - NEXUS_MQTT_CLIENT_ID=historian-1
-      - NEXUS_MQTT_TOPICS=+/+/+/#
-      # Historian database (TimescaleDB)
-      - NEXUS_DB_HOST=historian
-      - NEXUS_DB_PORT=5432
-      - NEXUS_DB_USER=${HISTORIAN_USER:-nexus}
-      - NEXUS_DB_PASSWORD=${HISTORIAN_PASSWORD:-nexus_historian_secret}
-      - NEXUS_DB_NAME=${HISTORIAN_DB:-nexus_historian}
-      - NEXUS_DB_POOL_SIZE=20
-      # Batch settings for high-throughput
-      - NEXUS_BATCH_SIZE=5000
-      - NEXUS_BATCH_INTERVAL_MS=1000
-      - NEXUS_BATCH_WORKERS=4
+      - ENVIRONMENT=${NEXUS_ENV:-production}
+      # MQTT connection for data ingestion (shared subscriptions for scaling)
+      - INGESTION_MQTT_BROKER_URL=tcp://emqx:1883
+      - MQTT_USERNAME=${MQTT_INGESTION_USER:-ingestion}
+      - MQTT_PASSWORD=${MQTT_INGESTION_PASS:-ingestion_secret}
+      - INGESTION_MQTT_CLIENT_ID=data-ingestion-1
+      # TimescaleDB connection
+      - INGESTION_DB_HOST=historian
+      - INGESTION_DB_PORT=5432
+      - INGESTION_DB_USER=${HISTORIAN_USER:-nexus_ingestion}
+      - INGESTION_DB_PASSWORD=${HISTORIAN_PASSWORD:-nexus_historian_secret}
+      - INGESTION_DB_NAME=${HISTORIAN_DB:-nexus_historian}
+      # Logging
+      - INGESTION_LOGGING_LEVEL=${LOG_LEVEL:-info}
       # Go runtime tuning
       - GOMAXPROCS=4
       - GOGC=100
     ports:
-      - "7000:7000"
+      - "7000:8080"
     networks:
       - nexus-internal
     depends_on:
@@ -325,7 +319,7 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/app/historian", "health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
