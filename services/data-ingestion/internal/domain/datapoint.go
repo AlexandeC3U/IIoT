@@ -53,13 +53,13 @@ type DataPoint struct {
 }
 
 // MQTTPayload represents the JSON structure from Protocol Gateway
+// Uses compact field names to match the gateway's output format
 type MQTTPayload struct {
-	Value           interface{} `json:"value"`
-	Quality         int16       `json:"quality"`
-	Unit            string      `json:"unit,omitempty"`
-	Timestamp       string      `json:"timestamp"`
-	SourceTimestamp string      `json:"source_timestamp,omitempty"`
-	ServerTimestamp string      `json:"server_timestamp,omitempty"`
+	Value           interface{} `json:"v"`              // Compact: "v" for value
+	Quality         string      `json:"q"`              // Compact: "q" for quality (string like "good", "bad")
+	Unit            string      `json:"u,omitempty"`    // Compact: "u" for unit
+	Timestamp       int64       `json:"ts"`             // Compact: "ts" for timestamp (unix milliseconds)
+	SourceTimestamp int64       `json:"source_ts,omitempty"`
 	DeviceID        string      `json:"device_id,omitempty"`
 	TagID           string      `json:"tag_id,omitempty"`
 }
@@ -75,7 +75,6 @@ func ParsePayload(topic string, payload []byte, receivedAt time.Time) (*DataPoin
 		Topic:      topic,
 		DeviceID:   p.DeviceID,
 		TagID:      p.TagID,
-		Quality:    p.Quality,
 		Unit:       p.Unit,
 		ReceivedAt: receivedAt,
 	}
@@ -102,37 +101,39 @@ func ParsePayload(topic string, payload []byte, receivedAt time.Time) (*DataPoin
 		}
 	}
 
-	// Parse timestamps
-	if p.Timestamp != "" {
-		if ts, err := time.Parse(time.RFC3339Nano, p.Timestamp); err == nil {
-			dp.Timestamp = ts
-		} else if ts, err := time.Parse(time.RFC3339, p.Timestamp); err == nil {
-			dp.Timestamp = ts
-		} else {
-			dp.Timestamp = receivedAt
-		}
+	// Parse quality string to OPC UA quality code
+	dp.Quality = qualityStringToCode(p.Quality)
+
+	// Parse timestamp from unix milliseconds
+	if p.Timestamp > 0 {
+		dp.Timestamp = time.UnixMilli(p.Timestamp)
 	} else {
 		dp.Timestamp = receivedAt
 	}
 
-	if p.SourceTimestamp != "" {
-		if ts, err := time.Parse(time.RFC3339Nano, p.SourceTimestamp); err == nil {
-			dp.SourceTimestamp = &ts
-		}
-	}
-
-	if p.ServerTimestamp != "" {
-		if ts, err := time.Parse(time.RFC3339Nano, p.ServerTimestamp); err == nil {
-			dp.ServerTimestamp = &ts
-		}
-	}
-
-	// Set default quality if not provided
-	if dp.Quality == 0 {
-		dp.Quality = 192 // OPC UA Good quality
+	// Parse source timestamp from unix milliseconds
+	if p.SourceTimestamp > 0 {
+		ts := time.UnixMilli(p.SourceTimestamp)
+		dp.SourceTimestamp = &ts
 	}
 
 	return dp, nil
+}
+
+// qualityStringToCode converts a quality string to OPC UA quality code
+func qualityStringToCode(q string) int16 {
+	switch q {
+	case "good":
+		return 192 // OPC UA Good (0xC0)
+	case "bad":
+		return 0 // OPC UA Bad
+	case "uncertain":
+		return 64 // OPC UA Uncertain (0x40)
+	case "not_connected", "config_error", "device_failure", "timeout":
+		return 0 // OPC UA Bad
+	default:
+		return 192 // Default to Good
+	}
 }
 
 // Batch represents a collection of data points to be written together

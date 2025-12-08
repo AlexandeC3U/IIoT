@@ -270,11 +270,17 @@ $$ LANGUAGE plpgsql;
 -- GRANTS
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- Grant permissions (adjust username as needed)
+-- Grant permissions to nexus_historian (query user)
 GRANT SELECT, INSERT ON metrics TO nexus_historian;
 GRANT SELECT ON metrics_1min, metrics_1hour, metrics_1day TO nexus_historian;
 GRANT EXECUTE ON FUNCTION query_metrics TO nexus_historian;
 GRANT EXECUTE ON FUNCTION get_optimal_aggregate TO nexus_historian;
+
+-- Grant permissions to nexus_ingestion (data ingestion service)
+GRANT INSERT, SELECT ON metrics TO nexus_ingestion;
+GRANT SELECT ON metrics_1min, metrics_1hour, metrics_1day TO nexus_ingestion;
+GRANT EXECUTE ON FUNCTION query_metrics TO nexus_ingestion;
+GRANT EXECUTE ON FUNCTION get_optimal_aggregate TO nexus_ingestion;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- INITIAL DATA VALIDATION

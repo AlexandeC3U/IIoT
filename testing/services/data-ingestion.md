@@ -19,9 +19,10 @@ This document provides a comprehensive guide for testing the Data Ingestion Serv
 ### Prerequisites
 
 Before starting the Data Ingestion service, ensure you have:
-- **Protocol Gateway running** (publishes data to MQTT)
-- **EMQX broker running** (receives messages from gateway)
-- **TimescaleDB running** (stores the data)
+- **Docker Desktop** installed and running
+- **No port conflicts** on 1883, 5432, 8081, 8082, 8083, 8084, 18083
+
+> **Note:** The `docker-compose.dev.yaml` starts ALL dependencies (EMQX, TimescaleDB, Protocol Gateway, Modbus Simulator) automatically.
 
 ### Option A: Docker Compose (Recommended for First Test)
 
@@ -42,11 +43,12 @@ docker-compose -f docker-compose.dev.yaml logs -f data-ingestion
 
 | Container | Port | Purpose |
 |-----------|------|---------|
-| `nexus-emqx-dev` | 1883, 18083 | MQTT Broker (Dashboard: http://localhost:18083) |
-| `nexus-timescaledb-dev` | 5432 | TimescaleDB (PostgreSQL with time-series extensions) |
-| `nexus-data-ingestion-dev` | 8081 | Data Ingestion Service |
-| `nexus-adminer-dev` | 8082 | Database Admin UI (http://localhost:8082) |
-| `nexus-modbus-sim` | 5020 | Modbus Simulator |
+| `nexus-emqx-ingestion` | 1883, 18083 | MQTT Broker (Dashboard: http://localhost:18083) |
+| `nexus-timescaledb` | 5432 | TimescaleDB (PostgreSQL with time-series extensions) |
+| `nexus-data-ingestion` | 8081 | Data Ingestion Service |
+| `nexus-protocol-gateway-ingestion` | 8082 | Protocol Gateway (for testing data flow) |
+| `nexus-adminer-dev` | 8084 | Database Admin UI (http://localhost:8084) |
+| `nexus-modbus-simulator-ingestion` | 5020 | Modbus Simulator |
 
 ### Option B: Run Locally (Native Go)
 
@@ -132,19 +134,18 @@ docker build -t nexus/data-ingestion:latest .
 
 | Step | Action | Details |
 |------|--------|---------|
-| 1 | Start Protocol Gateway | `cd ../protocol-gateway && docker-compose -f docker-compose.dev.yaml up -d` |
-| 2 | Verify Gateway is publishing | Check EMQX Dashboard → WebSocket Client → Subscribe to `dev/#` |
-| 3 | Start Data Ingestion | `cd ../data-ingestion && docker-compose -f docker-compose.dev.yaml up -d` |
-| 4 | Check ingestion status | `curl http://localhost:8081/status` |
-| 5 | Query TimescaleDB | Use Adminer (http://localhost:8082) or psql |
+| 1 | Start everything | `docker-compose -f docker-compose.dev.yaml up -d` (Protocol Gateway is included) |
+| 2 | Verify Gateway is publishing | Check EMQX Dashboard (http://localhost:18083) → Diagnose → WebSocket Client → Subscribe to `#` |
+| 3 | Check ingestion status | `Invoke-RestMethod http://localhost:8081/status` |
+| 4 | Query TimescaleDB | Use Adminer (http://localhost:8084) or psql |
 
 **Verify Data in TimescaleDB:**
 
-Using Adminer (http://localhost:8082):
+Using Adminer (http://localhost:8084):
 - System: PostgreSQL
 - Server: timescaledb
 - Username: nexus_ingestion
-- Password: nexus_dev
+- Password: ingestion_password
 - Database: nexus_historian
 
 Run this query:
@@ -221,10 +222,10 @@ LIMIT 20;
 
 | Test | How | Expected Behavior |
 |------|-----|-------------------|
-| Stop TimescaleDB | `docker stop nexus-timescaledb-dev` | Service logs errors, buffers data, retries |
-| Restart TimescaleDB | `docker start nexus-timescaledb-dev` | Service reconnects, resumes writing |
-| Stop EMQX | `docker stop nexus-emqx-dev` | Service disconnects, attempts reconnect |
-| Restart EMQX | `docker start nexus-emqx-dev` | Service reconnects, resumes receiving |
+| Stop TimescaleDB | `docker stop nexus-timescaledb` | Service logs errors, buffers data, retries |
+| Restart TimescaleDB | `docker start nexus-timescaledb` | Service reconnects, resumes writing |
+| Stop EMQX | `docker stop nexus-emqx-ingestion` | Service disconnects, attempts reconnect |
+| Restart EMQX | `docker start nexus-emqx-ingestion` | Service reconnects, resumes receiving |
 | High load test | Generate 10K+ messages | Buffer fills, metrics show behavior |
 
 ### Phase 6: Batch Verification 📦
@@ -301,11 +302,11 @@ Invoke-RestMethod http://localhost:8081/health
 Invoke-RestMethod http://localhost:8081/status
 
 # Access database UI
-# Open http://localhost:8082
-# Server: timescaledb, User: nexus_ingestion, Pass: nexus_dev, DB: nexus_historian
+# Open http://localhost:8084
+# Server: timescaledb, User: nexus_ingestion, Pass: ingestion_password, DB: nexus_historian
 
 # Query data via psql
-docker exec -it nexus-timescaledb-dev psql -U nexus_ingestion -d nexus_historian -c "SELECT * FROM metrics ORDER BY time DESC LIMIT 10;"
+docker exec -it nexus-timescaledb psql -U nexus_ingestion -d nexus_historian -c "SELECT * FROM metrics ORDER BY time DESC LIMIT 10;"
 
 # Stop everything
 docker-compose -f docker-compose.dev.yaml down
@@ -317,8 +318,8 @@ docker-compose -f docker-compose.dev.yaml down
 
 | Problem | Check | Solution |
 |---------|-------|----------|
-| Service won't start | `docker logs nexus-data-ingestion-dev` | Check error message |
-| No data in database | Is Protocol Gateway running? | Start protocol-gateway first |
+| Service won't start | `docker logs nexus-data-ingestion` | Check error message |
+| No data in database | Is Protocol Gateway running? | Check `docker ps` - it starts automatically |
 | "Connection refused" to DB | Is TimescaleDB running? | `docker ps` to check |
 | MQTT disconnected | Check EMQX status | Verify broker is running |
 | Buffer filling up | Database slow or down | Check DB connection and performance |

@@ -3,11 +3,37 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// expandEnvBraces expands only ${VAR} and ${VAR:default} patterns
+// This preserves $share prefixes used in MQTT shared subscriptions
+func expandEnvBraces(s string) string {
+	// Match ${VAR} or ${VAR:default}
+	re := regexp.MustCompile(`\$\{([^}:]+)(?::([^}]*))?\}`)
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		// Extract variable name and default value
+		parts := re.FindStringSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		varName := parts[1]
+		defaultVal := ""
+		if len(parts) >= 3 {
+			defaultVal = parts[2]
+		}
+
+		// Get env var value or use default
+		if val := os.Getenv(varName); val != "" {
+			return val
+		}
+		return defaultVal
+	})
+}
 
 // Config represents the complete service configuration
 type Config struct {
@@ -79,8 +105,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// Expand environment variables
-	expanded := os.ExpandEnv(string(data))
+	// Expand environment variables (only ${VAR} syntax, not $VAR)
+	// This preserves $share prefixes used in MQTT shared subscriptions
+	expanded := expandEnvBraces(string(data))
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {

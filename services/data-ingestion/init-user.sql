@@ -1,7 +1,17 @@
--- Create ingestion service user
--- This user has INSERT permissions only (no DELETE/UPDATE for safety)
+-- Create database users
+-- This script must run BEFORE the schema init script (mounted as 00-init-user.sql)
+-- Only creates roles here - table grants are done in 01-init.sql after tables exist
 
--- Create user if not exists
+-- Create nexus_historian role (used by init.sql GRANTS)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_historian') THEN
+        CREATE ROLE nexus_historian WITH LOGIN PASSWORD 'nexus_dev';
+    END IF;
+END
+$$;
+
+-- Create ingestion service user
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_ingestion') THEN
@@ -10,24 +20,15 @@ BEGIN
 END
 $$;
 
--- Grant permissions
+-- Basic permissions (database and schema level only - no table grants yet)
 GRANT CONNECT ON DATABASE nexus_historian TO nexus_ingestion;
+GRANT CONNECT ON DATABASE nexus_historian TO nexus_historian;
 GRANT USAGE ON SCHEMA public TO nexus_ingestion;
-
--- Grant INSERT on metrics table (no UPDATE/DELETE for safety)
-GRANT INSERT ON metrics TO nexus_ingestion;
-
--- Grant SELECT for health checks
-GRANT SELECT ON metrics TO nexus_ingestion;
-
--- Grant EXECUTE on functions
-GRANT EXECUTE ON FUNCTION query_metrics TO nexus_ingestion;
-GRANT EXECUTE ON FUNCTION get_optimal_aggregate TO nexus_ingestion;
+GRANT USAGE ON SCHEMA public TO nexus_historian;
 
 -- Log completion
 DO $$
 BEGIN
-    RAISE NOTICE 'Data Ingestion user created and permissions granted';
+    RAISE NOTICE 'Database users created: nexus_historian, nexus_ingestion';
 END
 $$;
-
