@@ -67,7 +67,7 @@ func NewBatcher(
 // Start begins the batching and writing goroutines
 func (b *Batcher) Start(ctx context.Context) {
 	b.ctx, b.cancel = context.WithCancel(ctx)
-	b.currentBatch = domain.NewBatch(b.config.BatchSize)
+	b.currentBatch = domain.AcquireBatch(b.config.BatchSize)
 
 	// Start batch accumulator
 	b.wg.Add(1)
@@ -185,7 +185,7 @@ func (b *Batcher) flushIfNotEmpty() {
 // Must be called with batchMu held
 func (b *Batcher) flush() {
 	batch := b.currentBatch
-	b.currentBatch = domain.NewBatch(b.config.BatchSize)
+	b.currentBatch = domain.AcquireBatch(b.config.BatchSize)
 
 	b.batchesFlushed.Add(1)
 	b.metrics.IncBatchesFlushed()
@@ -198,6 +198,7 @@ func (b *Batcher) flush() {
 		if err := b.writer.WriteBatch(context.Background(), batch); err != nil {
 			b.logger.Error().Err(err).Msg("Failed to write batch during shutdown")
 		}
+		domain.ReleaseBatch(batch)
 	}
 }
 
@@ -226,6 +227,8 @@ func (b *Batcher) writerLoop(id int) {
 				Int("batch_size", batch.Size()).
 				Msg("Failed to write batch")
 		}
+		// Return batch to pool for reuse
+		domain.ReleaseBatch(batch)
 	}
 
 	logger.Debug().Msg("Writer stopped")

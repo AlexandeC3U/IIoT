@@ -2,7 +2,18 @@ package domain
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
+)
+
+// Object pools to reduce GC pressure in high-throughput scenarios
+var (
+	dataPointPool = sync.Pool{
+		New: func() interface{} { return &DataPoint{} },
+	}
+	batchPool = sync.Pool{
+		New: func() interface{} { return &Batch{Points: make([]*DataPoint, 0, 5000)} },
+	}
 )
 
 // DataPoint represents a single measurement from a device
@@ -138,6 +149,30 @@ func NewBatch(capacity int) *Batch {
 	}
 }
 
+// AcquireBatch gets a Batch from the pool and initializes it.
+// This reduces GC pressure in high-throughput scenarios.
+// Remember to call ReleaseBatch() when done.
+func AcquireBatch(capacity int) *Batch {
+	b := batchPool.Get().(*Batch)
+	b.Points = b.Points[:0] // Reset length but keep capacity
+	b.CreatedAt = time.Now()
+	return b
+}
+
+// ReleaseBatch returns a Batch to the pool for reuse.
+// After calling this, the Batch should not be used anymore.
+func ReleaseBatch(b *Batch) {
+	if b == nil {
+		return
+	}
+	// Clear references to allow GC of DataPoint objects
+	for i := range b.Points {
+		b.Points[i] = nil
+	}
+	b.Points = b.Points[:0]
+	batchPool.Put(b)
+}
+
 // Add appends a data point to the batch
 func (b *Batch) Add(dp *DataPoint) {
 	b.Points = append(b.Points, dp)
@@ -155,7 +190,35 @@ func (b *Batch) Age() time.Duration {
 
 // Clear resets the batch for reuse
 func (b *Batch) Clear() {
+	for i := range b.Points {
+		b.Points[i] = nil
+	}
 	b.Points = b.Points[:0]
 	b.CreatedAt = time.Now()
+}
+
+// AcquireDataPoint gets a DataPoint from the pool and initializes it.
+func AcquireDataPoint() *DataPoint {
+	return dataPointPool.Get().(*DataPoint)
+}
+
+// ReleaseDataPoint returns a DataPoint to the pool for reuse.
+func ReleaseDataPoint(dp *DataPoint) {
+	if dp == nil {
+		return
+	}
+	// Clear all fields
+	dp.Topic = ""
+	dp.DeviceID = ""
+	dp.TagID = ""
+	dp.Value = nil
+	dp.ValueStr = nil
+	dp.Quality = 0
+	dp.Unit = ""
+	dp.Timestamp = time.Time{}
+	dp.SourceTimestamp = nil
+	dp.ServerTimestamp = nil
+	dp.ReceivedAt = time.Time{}
+	dataPointPool.Put(dp)
 }
 
