@@ -9,17 +9,19 @@ import (
 // Registry holds all Prometheus metrics for the service.
 type Registry struct {
 	// Connection metrics
-	ActiveConnections   prometheus.Gauge
-	ConnectionsTotal    prometheus.Counter
-	ConnectionErrors    prometheus.Counter
-	ConnectionLatency   prometheus.Histogram
+	ActiveConnections prometheus.Gauge
+	ConnectionsTotal  prometheus.Counter
+	ConnectionErrors  prometheus.Counter
+	ConnectionLatency prometheus.Histogram
 
 	// Polling metrics
-	PollsTotal          *prometheus.CounterVec
-	PollDuration        *prometheus.HistogramVec
-	PollErrors          *prometheus.CounterVec
-	PointsRead          prometheus.Counter
-	PointsPublished     prometheus.Counter
+	PollsTotal            *prometheus.CounterVec
+	PollsSkipped          prometheus.Counter // Back-pressure skips
+	PollDuration          *prometheus.HistogramVec
+	PollErrors            *prometheus.CounterVec
+	PointsRead            prometheus.Counter
+	PointsPublished       prometheus.Counter
+	WorkerPoolUtilization prometheus.Gauge // Current workers in use / max workers
 
 	// MQTT metrics
 	MQTTMessagesPublished prometheus.Counter
@@ -29,13 +31,13 @@ type Registry struct {
 	MQTTReconnects        prometheus.Counter
 
 	// Device metrics
-	DevicesRegistered   prometheus.Gauge
-	DevicesOnline       prometheus.Gauge
-	DeviceErrors        *prometheus.CounterVec
+	DevicesRegistered prometheus.Gauge
+	DevicesOnline     prometheus.Gauge
+	DeviceErrors      *prometheus.CounterVec
 
 	// System metrics
-	GoroutineCount      prometheus.Gauge
-	MemoryUsage         prometheus.Gauge
+	GoroutineCount prometheus.Gauge
+	MemoryUsage    prometheus.Gauge
 }
 
 // NewRegistry creates a new metrics registry with all metrics registered.
@@ -75,13 +77,19 @@ func NewRegistry() *Registry {
 			Name:      "polls_total",
 			Help:      "Total number of poll operations",
 		}, []string{"device_id", "status"}),
+		PollsSkipped: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "polling",
+			Name:      "polls_skipped_total",
+			Help:      "Total polls skipped due to worker pool back-pressure",
+		}),
 		PollDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "gateway",
 			Subsystem: "polling",
 			Name:      "duration_seconds",
-			Help:      "Poll cycle duration in seconds",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
-		}, []string{"device_id"}),
+			Help:      "Poll cycle duration in seconds (per-device for p95/p99 analysis)",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}, []string{"device_id", "protocol"}),
 		PollErrors: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "gateway",
 			Subsystem: "polling",
@@ -99,6 +107,12 @@ func NewRegistry() *Registry {
 			Subsystem: "polling",
 			Name:      "points_published_total",
 			Help:      "Total number of data points published",
+		}),
+		WorkerPoolUtilization: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "polling",
+			Name:      "worker_pool_utilization",
+			Help:      "Current worker pool utilization (0-1)",
 		}),
 
 		// MQTT metrics
@@ -173,9 +187,9 @@ func NewRegistry() *Registry {
 }
 
 // RecordPollSuccess records a successful poll operation.
-func (r *Registry) RecordPollSuccess(deviceID string, duration float64, pointsRead int) {
+func (r *Registry) RecordPollSuccess(deviceID string, protocol string, duration float64, pointsRead int) {
 	r.PollsTotal.WithLabelValues(deviceID, "success").Inc()
-	r.PollDuration.WithLabelValues(deviceID).Observe(duration)
+	r.PollDuration.WithLabelValues(deviceID, protocol).Observe(duration)
 	r.PointsRead.Add(float64(pointsRead))
 }
 
@@ -183,6 +197,18 @@ func (r *Registry) RecordPollSuccess(deviceID string, duration float64, pointsRe
 func (r *Registry) RecordPollError(deviceID string, errorType string) {
 	r.PollsTotal.WithLabelValues(deviceID, "error").Inc()
 	r.PollErrors.WithLabelValues(deviceID, errorType).Inc()
+}
+
+// RecordPollSkipped records a skipped poll due to back-pressure.
+func (r *Registry) RecordPollSkipped() {
+	r.PollsSkipped.Inc()
+}
+
+// UpdateWorkerPoolUtilization updates the worker pool utilization gauge.
+func (r *Registry) UpdateWorkerPoolUtilization(inUse, maxWorkers int) {
+	if maxWorkers > 0 {
+		r.WorkerPoolUtilization.Set(float64(inUse) / float64(maxWorkers))
+	}
 }
 
 // RecordMQTTPublish records an MQTT publish operation.
@@ -219,4 +245,3 @@ func (r *Registry) UpdateDeviceCount(registered, online int) {
 func (r *Registry) UpdateActiveConnections(count int) {
 	r.ActiveConnections.Set(float64(count))
 }
-

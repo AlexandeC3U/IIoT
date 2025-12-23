@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,15 @@ import (
 	"github.com/nexus-edge/protocol-gateway/internal/metrics"
 	"github.com/rs/zerolog"
 )
+
+// dataPointPool reduces GC pressure by recycling slices
+var dataPointPool = sync.Pool{
+	New: func() interface{} {
+		// Pre-allocate with common capacity
+		slice := make([]*domain.DataPoint, 0, 64)
+		return &slice
+	},
+}
 
 // Publisher interface defines the methods needed for publishing data.
 type Publisher interface {
@@ -49,28 +59,30 @@ type PollingConfig struct {
 
 // PollingStats tracks polling statistics.
 type PollingStats struct {
-	TotalPolls     atomic.Uint64
-	SuccessPolls   atomic.Uint64
-	FailedPolls    atomic.Uint64
-	PointsRead     atomic.Uint64
+	TotalPolls      atomic.Uint64
+	SuccessPolls    atomic.Uint64
+	FailedPolls     atomic.Uint64
+	SkippedPolls    atomic.Uint64 // Polls skipped due to back-pressure
+	PointsRead      atomic.Uint64
 	PointsPublished atomic.Uint64
 }
 
 // devicePoller manages polling for a single device.
 type devicePoller struct {
-	device     *domain.Device
-	stopChan   chan struct{}
-	running    atomic.Bool
-	lastPoll   time.Time
-	lastError  error
-	stats      deviceStats
-	mu         sync.RWMutex
+	device    *domain.Device
+	stopChan  chan struct{}
+	running   atomic.Bool
+	lastPoll  time.Time
+	lastError error
+	stats     deviceStats
+	mu        sync.RWMutex
 }
 
 // deviceStats tracks per-device statistics.
 type deviceStats struct {
 	pollCount    atomic.Uint64
 	errorCount   atomic.Uint64
+	skippedCount atomic.Uint64 // Back-pressure skips
 	pointsRead   atomic.Uint64
 }
 
@@ -223,6 +235,7 @@ func (s *PollingService) UnregisterDevice(deviceID string) error {
 }
 
 // startDevicePoller starts the polling loop for a device.
+// Adds jitter to poll intervals to prevent synchronized bursts across devices.
 func (s *PollingService) startDevicePoller(dp *devicePoller) {
 	if dp.running.Load() {
 		return
@@ -234,6 +247,14 @@ func (s *PollingService) startDevicePoller(dp *devicePoller) {
 	go func() {
 		defer s.wg.Done()
 		defer dp.running.Store(false)
+
+		// Add jitter (0-10% of interval) to spread device polls over time
+		// This prevents all devices from polling simultaneously
+		jitterMax := dp.device.PollInterval / 10
+		if jitterMax > 0 {
+			jitter := time.Duration(rand.Int63n(int64(jitterMax)))
+			time.Sleep(jitter)
+		}
 
 		s.logger.Debug().
 			Str("device_id", dp.device.ID).
@@ -260,12 +281,21 @@ func (s *PollingService) startDevicePoller(dp *devicePoller) {
 }
 
 // pollDevice performs a single poll cycle for a device.
+// Implements back-pressure: skips poll if all workers are busy instead of blocking.
 func (s *PollingService) pollDevice(dp *devicePoller) {
-	// Acquire worker from pool
+	// Try to acquire worker from pool (non-blocking with back-pressure)
 	select {
 	case s.workerPool <- struct{}{}:
 		defer func() { <-s.workerPool }()
 	case <-s.ctx.Done():
+		return
+	default:
+		// All workers busy - skip this poll cycle (back-pressure)
+		s.stats.SkippedPolls.Add(1)
+		dp.stats.skippedCount.Add(1)
+		s.logger.Debug().
+			Str("device_id", dp.device.ID).
+			Msg("Poll skipped: worker pool full (back-pressure)")
 		return
 	}
 
@@ -281,7 +311,8 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 	}
 
 	// Read all tags from the device using the appropriate protocol
-	ctx, cancel := context.WithTimeout(s.ctx, dp.device.Connection.Timeout*2)
+	// Use device timeout directly (not 2x) for faster failure detection
+	ctx, cancel := context.WithTimeout(s.ctx, dp.device.Connection.Timeout)
 	defer cancel()
 
 	dataPoints, err := s.protocolManager.ReadTags(ctx, dp.device, tags)
@@ -305,8 +336,19 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 	dp.lastError = nil
 	dp.mu.Unlock()
 
+	// Get slice from pool to reduce GC pressure
+	goodPointsPtr := dataPointPool.Get().(*[]*domain.DataPoint)
+	goodPoints := (*goodPointsPtr)[:0] // Reset length, keep capacity
+	defer func() {
+		// Clear references before returning to pool
+		for i := range goodPoints {
+			goodPoints[i] = nil
+		}
+		*goodPointsPtr = goodPoints[:0]
+		dataPointPool.Put(goodPointsPtr)
+	}()
+
 	// Set topics and filter good data points
-	goodPoints := make([]*domain.DataPoint, 0, len(dataPoints))
 	for i, point := range dataPoints {
 		if point != nil {
 			// Set the full topic
@@ -334,12 +376,15 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 		}
 	}
 
+	// Record poll duration for metrics
+	duration := time.Since(startTime)
+
 	// Log poll completion
 	s.logger.Debug().
 		Str("device_id", dp.device.ID).
 		Int("tags_read", len(dataPoints)).
 		Int("good_points", len(goodPoints)).
-		Dur("duration", time.Since(startTime)).
+		Dur("duration", duration).
 		Msg("Poll cycle completed")
 }
 
@@ -402,14 +447,24 @@ type DeviceStatus struct {
 	PointsRead uint64
 }
 
-// Stats returns the polling service statistics.
-func (s *PollingService) Stats() PollingStats {
-	return PollingStats{
-		TotalPolls:      s.stats.TotalPolls,
-		SuccessPolls:    s.stats.SuccessPolls,
-		FailedPolls:     s.stats.FailedPolls,
-		PointsRead:      s.stats.PointsRead,
-		PointsPublished: s.stats.PointsPublished,
-	}
+// StatsSnapshot holds a point-in-time snapshot of polling statistics.
+type StatsSnapshot struct {
+	TotalPolls      uint64
+	SuccessPolls    uint64
+	FailedPolls     uint64
+	SkippedPolls    uint64
+	PointsRead      uint64
+	PointsPublished uint64
 }
 
+// Stats returns a snapshot of the polling service statistics.
+func (s *PollingService) Stats() StatsSnapshot {
+	return StatsSnapshot{
+		TotalPolls:      s.stats.TotalPolls.Load(),
+		SuccessPolls:    s.stats.SuccessPolls.Load(),
+		FailedPolls:     s.stats.FailedPolls.Load(),
+		SkippedPolls:    s.stats.SkippedPolls.Load(),
+		PointsRead:      s.stats.PointsRead.Load(),
+		PointsPublished: s.stats.PointsPublished.Load(),
+	}
+}

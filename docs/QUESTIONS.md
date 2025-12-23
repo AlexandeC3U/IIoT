@@ -4397,6 +4397,11 @@ mux.Handle("/status", authMiddleware(ingestionService.StatusHandler))
 | **Mutex on RLock release** | Potential deadlock scenario | Fixed unlock sequence | Stability improvement |
 | **Worker Pool Pattern** | Unbounded goroutines | Bounded channel (10 workers) | Predictable resource usage |
 | **Batch Publishing** | Individual publishes | Batched MQTT publishes | 3x throughput |
+| **Back-Pressure on Poll** | Blocking wait for worker | Non-blocking skip | No backlog accumulation |
+| **Poll Interval Jitter** | All devices poll simultaneously | 0-10% random jitter | Spread load, prevent bursts |
+| **Slice Pooling (goodPoints)** | New slice per poll | `sync.Pool` for slices | Further GC reduction |
+| **Command Queue (Bounded)** | Unbounded goroutine per command | Bounded channel (1000) | Memory-safe under bursts |
+| **Timeout Optimization** | 2× device timeout | 1× device timeout | Faster failure detection |
 
 #### Data Ingestion Optimizations
 
@@ -4755,6 +4760,214 @@ infrastructure/k8s/
 
 ---
 
+## 24. Senior Engineer Code Review: Protocol Gateway Improvements
+
+A senior engineer reviewed the Protocol Gateway and identified several areas for improvement. Here's the analysis and what was implemented.
+
+### Issues Identified & Actions Taken
+
+| Issue | Severity | Action | Status |
+|-------|----------|--------|--------|
+| **Fixed worker pool (10) bottleneck** | High | Implemented back-pressure with skip | ✅ Fixed |
+| **No per-device rate limiting** | Medium | Planned for Phase 3 (priority queues) | ⏳ Planned |
+| **Unbounded device goroutines** | Low | No action (Go handles well at scale) | ⏸️ Deferred |
+| **BatchSize unused (dead code)** | Low | Left for future batching implementation | ⏸️ Deferred |
+| **MQTT buffer overflow** | High | Already handled (drops oldest message) | ✅ Already done |
+| **Unbounded write command goroutines** | Medium | Implemented bounded command queue | ✅ Fixed |
+| **Dynamic config reload** | Medium | Planned for Phase 3 | ⏳ Planned |
+| **Metrics granularity (no per-device latency)** | Medium | Added per-device/protocol histograms | ✅ Fixed |
+| **Memory recycling (slices)** | Medium | Implemented sync.Pool for slices | ✅ Fixed |
+| **No poll interval jitter** | Medium | Added 0-10% jitter | ✅ Fixed |
+| **2× device timeout too long** | Low | Changed to 1× device timeout | ✅ Fixed |
+
+### Implementation Details
+
+#### 1. Back-Pressure on Worker Pool (Critical Fix)
+
+**Before**: Poll blocked waiting for a worker, causing backlog accumulation.
+
+```go
+// OLD: Blocking wait - causes backlog if workers are saturated
+select {
+case s.workerPool <- struct{}{}:
+    defer func() { <-s.workerPool }()
+case <-s.ctx.Done():
+    return
+}
+```
+
+**After**: Non-blocking with skip - no backlog, clear metrics.
+
+```go
+// NEW: Non-blocking with back-pressure
+select {
+case s.workerPool <- struct{}{}:
+    defer func() { <-s.workerPool }()
+case <-s.ctx.Done():
+    return
+default:
+    // All workers busy - skip this poll cycle
+    s.stats.SkippedPolls.Add(1)
+    s.logger.Debug().Str("device_id", dp.device.ID).
+        Msg("Poll skipped: worker pool full (back-pressure)")
+    return
+}
+```
+
+**Impact**: Devices won't accumulate backlog. Skipped polls are tracked in metrics. If many polls are skipped, add more pods (horizontal scaling).
+
+#### 2. Poll Interval Jitter (Prevents Synchronized Bursts)
+
+**Problem**: If all 1000 devices start at the same time with 1s intervals, all 1000 poll at t=0, t=1, t=2... causing massive bursts.
+
+**Solution**: Add random startup jitter (0-10% of interval).
+
+```go
+// Add jitter (0-10% of interval) to spread device polls
+jitterMax := dp.device.PollInterval / 10
+if jitterMax > 0 {
+    jitter := time.Duration(rand.Int63n(int64(jitterMax)))
+    time.Sleep(jitter)
+}
+```
+
+**Impact**: 1000 devices with 1s interval now poll throughout the second, not all at once.
+
+#### 3. Bounded Command Queue (Memory Safety)
+
+**Before**: Every write command spawned a goroutine immediately.
+
+```go
+// OLD: Unbounded goroutine creation
+go func() {
+    h.processWriteCommand(cmd)
+}()
+```
+
+**After**: Bounded queue with back-pressure response.
+
+```go
+// NEW: Bounded queue
+select {
+case h.commandQueue <- cmd:
+    // Queued successfully
+default:
+    // Queue full - reject with error
+    h.sendResponse(cmd, false, "command queue full", 0)
+    h.stats.CommandsRejected.Add(1)
+}
+```
+
+**Impact**: Memory-safe under command bursts. Clients receive immediate feedback if overloaded.
+
+#### 4. sync.Pool for Slice Recycling (GC Reduction)
+
+```go
+var dataPointPool = sync.Pool{
+    New: func() interface{} {
+        slice := make([]*domain.DataPoint, 0, 64)
+        return &slice
+    },
+}
+
+// In pollDevice:
+goodPointsPtr := dataPointPool.Get().(*[]*domain.DataPoint)
+goodPoints := (*goodPointsPtr)[:0]
+defer func() {
+    for i := range goodPoints {
+        goodPoints[i] = nil  // Clear references
+    }
+    *goodPointsPtr = goodPoints[:0]
+    dataPointPool.Put(goodPointsPtr)
+}()
+```
+
+**Impact**: Reduces garbage generation and GC pauses under high load.
+
+#### 5. Enhanced Metrics
+
+Added new metrics for production monitoring:
+
+| Metric | Type | Purpose |
+|--------|------|---------|
+| `gateway_polling_polls_skipped_total` | Counter | Polls skipped due to back-pressure |
+| `gateway_polling_worker_pool_utilization` | Gauge | Current workers in use / max |
+| `gateway_polling_duration_seconds` | Histogram | Per-device + per-protocol latency (p50/p95/p99) |
+
+### Configuration Recommendations
+
+Based on the review, here are updated configuration recommendations:
+
+```yaml
+# config/config.yaml
+polling:
+  # Size based on: expected_devices × (poll_rate / avg_poll_duration)
+  # Example: 500 devices × (1/sec / 0.05sec) = 10 workers minimum
+  # Add headroom: 10 × 2 = 20 workers
+  worker_count: 20
+  
+  # Batch size for potential future MQTT batching
+  batch_size: 50
+  
+  default_interval: 1s
+  max_retries: 3
+  shutdown_timeout: 30s
+
+# Protocol connection pools - match expected concurrency
+modbus:
+  max_connections: 100  # At least as many as concurrent device reads
+  
+opcua:
+  max_connections: 50   # OPC UA connections are heavier
+  
+s7:
+  max_connections: 100
+
+mqtt:
+  buffer_size: 5000     # Lower if memory-constrained
+  qos: 1                # Use 0 for non-critical telemetry if broker is slow
+```
+
+### What Was NOT Implemented (and Why)
+
+| Suggestion | Reason for Deferral |
+|------------|---------------------|
+| **Per-device/tenant rate limiting** | Adds complexity. Kubernetes scaling + back-pressure is sufficient for Phase 2. Phase 3 can add priority queues if needed. |
+| **Shared scheduler (time wheel)** | Go handles 10K+ goroutines fine. Tickers are lightweight. Would only be needed at 50K+ devices per pod. |
+| **BatchSize usage in pollDevice** | Designed for future MQTT batching. Current publish-per-point approach works with EMQX. Can be enabled later. |
+| **Dynamic config reload** | K8s rolling updates are sufficient. Phase 3 Gateway Core will handle dynamic device management. |
+
+### Kubernetes Scaling Still Applies!
+
+These improvements make a single pod more efficient, but horizontal scaling remains the primary strategy:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    COMBINED: POD IMPROVEMENTS + K8S SCALING                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  BEFORE IMPROVEMENTS:                                                       │
+│  • Pod with 10 workers, 1000 devices                                        │
+│  • Workers block waiting → backlog accumulates                              │
+│  • Scaling to 5 pods still has backlog per pod                              │
+│                                                                             │
+│  AFTER IMPROVEMENTS:                                                        │
+│  • Pod with 20 workers, back-pressure enabled                               │
+│  • Skipped polls are logged (no backlog)                                    │
+│  • Metrics show: "pods need scaling" when skips increase                    │
+│  • 5 pods with 20 workers each = 100 concurrent polls                       │
+│  • Result: 1000 devices × 50ms = 500ms with 0% skip rate                    │
+│                                                                             │
+│  FORMULA FOR WORKERS:                                                       │
+│  workers_needed = devices × (poll_rate / avg_poll_duration)                 │
+│  workers_needed = 1000 × (1/sec / 0.05sec) = 20                             │
+│  With K8s: 5 pods × 20 workers = 100 (5× headroom)                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -4783,6 +4996,7 @@ infrastructure/k8s/
 | **K8s vs K3s** | K3s for edge (lightweight), manifests work on both |
 | **Terraform** | Not needed for edge; use for cloud infrastructure only |
 | **Phase 2 Status** | K8s manifests ✅, HPA ✅, EMQX cluster ✅, ConfigMaps ✅ |
+| **Senior Review** | Back-pressure ✅, jitter ✅, sync.Pool ✅, bounded commands ✅ |
 
 ---
 

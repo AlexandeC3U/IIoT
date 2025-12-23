@@ -17,7 +17,7 @@ import (
 
 // CommandHandler handles write commands received via MQTT.
 // It subscribes to command topics and routes write requests to the appropriate protocol driver.
-// Implements rate limiting via semaphore to prevent overwhelming devices.
+// Implements rate limiting via semaphore and bounded queue to prevent overwhelming devices.
 type CommandHandler struct {
 	mqttClient      mqtt.Client
 	protocolManager *domain.ProtocolManager
@@ -30,7 +30,8 @@ type CommandHandler struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
-	writeSemaphore  chan struct{} // Rate limiter for concurrent writes
+	writeSemaphore  chan struct{}     // Rate limiter for concurrent writes
+	commandQueue    chan WriteCommand // Bounded queue for back-pressure
 }
 
 // CommandConfig holds configuration for the command handler.
@@ -54,6 +55,10 @@ type CommandConfig struct {
 
 	// MaxConcurrentWrites limits concurrent write operations
 	MaxConcurrentWrites int
+
+	// CommandQueueSize is the max number of commands to queue before applying back-pressure
+	// Commands beyond this limit are rejected with "queue full" error
+	CommandQueueSize int
 }
 
 // DefaultCommandConfig returns sensible defaults for command handling.
@@ -65,6 +70,7 @@ func DefaultCommandConfig() CommandConfig {
 		QoS:                   1,
 		EnableAcknowledgement: true,
 		MaxConcurrentWrites:   50,
+		CommandQueueSize:      1000, // Buffer up to 1000 commands before back-pressure
 	}
 }
 
@@ -135,6 +141,9 @@ func NewCommandHandler(
 	if config.MaxConcurrentWrites <= 0 {
 		config.MaxConcurrentWrites = 50
 	}
+	if config.CommandQueueSize <= 0 {
+		config.CommandQueueSize = 1000
+	}
 
 	h := &CommandHandler{
 		mqttClient:      mqttClient,
@@ -146,6 +155,7 @@ func NewCommandHandler(
 		ctx:             ctx,
 		cancel:          cancel,
 		writeSemaphore:  make(chan struct{}, config.MaxConcurrentWrites),
+		commandQueue:    make(chan WriteCommand, config.CommandQueueSize),
 	}
 
 	// Index devices by ID
@@ -155,7 +165,8 @@ func NewCommandHandler(
 
 	h.logger.Info().
 		Int("max_concurrent_writes", config.MaxConcurrentWrites).
-		Msg("Command handler initialized with rate limiting")
+		Int("queue_size", config.CommandQueueSize).
+		Msg("Command handler initialized with rate limiting and bounded queue")
 
 	return h
 }
@@ -169,6 +180,10 @@ func (h *CommandHandler) Start() error {
 	h.logger.Info().
 		Str("topic_prefix", h.config.CommandTopicPrefix).
 		Msg("Starting command handler")
+
+	// Start command queue processor
+	h.wg.Add(1)
+	go h.processCommandQueue()
 
 	// Subscribe to write command topic
 	// Topic pattern: $nexus/cmd/{device_id}/write
@@ -214,6 +229,42 @@ func (h *CommandHandler) Stop() error {
 	return nil
 }
 
+// processCommandQueue processes commands from the bounded queue.
+// This limits goroutine creation and provides predictable resource usage.
+func (h *CommandHandler) processCommandQueue() {
+	defer h.wg.Done()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			// Drain remaining commands on shutdown
+			h.drainCommandQueue()
+			return
+		case cmd := <-h.commandQueue:
+			h.processWriteCommand(cmd)
+		}
+	}
+}
+
+// drainCommandQueue attempts to process remaining commands on shutdown.
+func (h *CommandHandler) drainCommandQueue() {
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case cmd := <-h.commandQueue:
+			h.processWriteCommand(cmd)
+		case <-timeout:
+			remaining := len(h.commandQueue)
+			if remaining > 0 {
+				h.logger.Warn().Int("count", remaining).Msg("Timeout draining command queue, commands dropped")
+			}
+			return
+		default:
+			return
+		}
+	}
+}
+
 // handleWriteCommand handles JSON write commands.
 // Topic: $nexus/cmd/{device_id}/write
 // Payload: {"tag_id": "...", "value": ...}
@@ -249,12 +300,19 @@ func (h *CommandHandler) handleWriteCommand(client mqtt.Client, msg mqtt.Message
 		cmd.Timestamp = time.Now()
 	}
 
-	// Process command
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		h.processWriteCommand(cmd)
-	}()
+	// Queue command with back-pressure (non-blocking)
+	select {
+	case h.commandQueue <- cmd:
+		// Queued successfully
+	default:
+		// Queue full - apply back-pressure
+		h.logger.Warn().
+			Str("device_id", cmd.DeviceID).
+			Str("tag_id", cmd.TagID).
+			Msg("Command rejected: queue full (back-pressure)")
+		h.sendResponse(cmd, false, "command queue full, try again later", 0)
+		h.stats.CommandsRejected.Add(1)
+	}
 }
 
 // handleTagWriteCommand handles simple tag write commands.
@@ -291,12 +349,19 @@ func (h *CommandHandler) handleTagWriteCommand(client mqtt.Client, msg mqtt.Mess
 		Timestamp: time.Now(),
 	}
 
-	// Process command
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		h.processWriteCommand(cmd)
-	}()
+	// Queue command with back-pressure (non-blocking)
+	select {
+	case h.commandQueue <- cmd:
+		// Queued successfully
+	default:
+		// Queue full - apply back-pressure
+		h.logger.Warn().
+			Str("device_id", cmd.DeviceID).
+			Str("tag_id", cmd.TagID).
+			Msg("Command rejected: queue full (back-pressure)")
+		h.sendResponse(cmd, false, "command queue full, try again later", 0)
+		h.stats.CommandsRejected.Add(1)
+	}
 }
 
 // processWriteCommand processes a write command with rate limiting.
@@ -465,4 +530,3 @@ func (h *CommandHandler) GetStats() map[string]uint64 {
 		"commands_rejected":  h.stats.CommandsRejected.Load(),
 	}
 }
-

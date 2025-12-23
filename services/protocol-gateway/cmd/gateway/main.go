@@ -212,10 +212,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		stats := pollingSvc.Stats()
-		fmt.Fprintf(w, `{"service":"%s","version":"%s","polling":{"total_polls":%d,"success_polls":%d,"failed_polls":%d,"points_read":%d,"points_published":%d}}`,
+		fmt.Fprintf(w, `{"service":"%s","version":"%s","polling":{"total_polls":%d,"success_polls":%d,"failed_polls":%d,"skipped_polls":%d,"points_read":%d,"points_published":%d}}`,
 			serviceName, serviceVersion,
-			stats.TotalPolls.Load(), stats.SuccessPolls.Load(), stats.FailedPolls.Load(),
-			stats.PointsRead.Load(), stats.PointsPublished.Load())
+			stats.TotalPolls, stats.SuccessPolls, stats.FailedPolls, stats.SkippedPolls,
+			stats.PointsRead, stats.PointsPublished)
 	})
 
 	httpServer := &http.Server{
