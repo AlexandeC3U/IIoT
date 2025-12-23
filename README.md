@@ -1263,40 +1263,34 @@ open https://<EXTERNAL-IP>
 
 ## 🗺️ Roadmap
 
-### Phase 1: Foundation (Current)
-- [x] Core architecture design
-- [x] Protocol Gateway (Modbus, OPC UA, S7) with **bidirectional communication**
-- [x] **Write support** via MQTT command topics
-- [x] Connection pooling with circuit breakers
-- [x] EMQX broker integration
-- [x] **Data Ingestion Service** (MQTT → TimescaleDB)
-- [x] TimescaleDB schema with continuous aggregates
-- [ ] Basic React frontend
-- [ ] Device management UI
-- [ ] Container management (Docker)
+> 📋 **Full roadmap with detailed timelines: [ROADMAP.md](ROADMAP.md)**
 
-### Phase 2: Advanced Features
-- [ ] Visual flow designer
-- [ ] Dashboard builder
-- [ ] Alert rule engine
-- [ ] OPC UA tag discovery
-- [ ] Network device scanning
-- [ ] Kubernetes (K3s) support
+```
+Phase 1: Foundation          ████████████████████ 100% ✅
+Phase 2: Kubernetes          ████████████████░░░░  85% ✅
+Phase 3: Gateway Core        ░░░░░░░░░░░░░░░░░░░░   0% ⏳
+Phase 4: Analytics           ░░░░░░░░░░░░░░░░░░░░   0% 📋
+Phase 5: Enterprise          ░░░░░░░░░░░░░░░░░░░░   0% 📋
+```
 
-### Phase 3: Enterprise
-- [ ] Cloud management portal
-- [ ] Multi-site fleet management
-- [ ] LDAP/SAML authentication
-- [ ] Audit logging
-- [ ] Compliance reporting
-- [ ] High availability clustering
+### ✅ Completed
+- Protocol Gateway (Modbus, OPC UA, S7) with bidirectional communication
+- Connection pooling, circuit breakers, worker pools
+- EMQX broker integration with shared subscriptions
+- Data Ingestion Service (MQTT → TimescaleDB with COPY protocol)
+- Kubernetes manifests (Kustomize) with HPA, PDB, RBAC
+- EMQX 3-node clustering with DNS discovery
 
-### Phase 4: Intelligence
-- [ ] AI/ML inference engine
-- [ ] Anomaly detection
-- [ ] Predictive maintenance models
-- [ ] Natural language queries
-- [ ] Automated optimization
+### ⏳ In Progress (Phase 2)
+- TimescaleDB High Availability (Patroni)
+
+### 📋 Next Up (Phase 3)
+- Gateway Core Service (device management API)
+- Web UI for device configuration
+- Dynamic device registration (hot-reload)
+- Data Normalizer (unit conversion, scaling)
+
+See [ROADMAP.md](ROADMAP.md) for the complete 5-phase plan through v1.0 release.
 
 ---
 

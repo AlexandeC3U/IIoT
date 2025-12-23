@@ -4451,105 +4451,41 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 
 ## 21. Development Roadmap
 
-### Phase 1: Foundation ✅ (Current - December 2024)
+> 📋 **Full roadmap details available in [ROADMAP.md](/ROADMAP.md)**
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Protocol Gateway (Modbus) | ✅ Complete | Production-ready |
-| Protocol Gateway (OPC UA) | ✅ Complete | Polling + subscriptions |
-| Protocol Gateway (S7/Siemens) | ✅ Complete | TCP support |
-| MQTT Publishing (UNS) | ✅ Complete | With quality codes |
-| Bidirectional Commands | ✅ Complete | Write support |
-| Data Ingestion Service | ✅ Complete | TimescaleDB with COPY |
-| Development Environment | ✅ Complete | Docker Compose |
-| Testing Documentation | ✅ Complete | Step-by-step guides |
+### Quick Status Overview
 
-### Phase 2: Kubernetes & Scaling (Q1 2025)
+| Phase | Status | Timeline |
+|-------|--------|----------|
+| **Phase 1: Foundation** | ✅ 100% Complete | Nov-Dec 2025 |
+| **Phase 2: Kubernetes & Scaling** | ✅ 85% Complete | Dec 2025 - Jan 2026 |
+| **Phase 3: Gateway Core & Management** | ⏳ Not Started | Q1-Q2 2026 |
+| **Phase 4: Analytics & Advanced Features** | 📋 Planned | Q2-Q3 2026 |
+| **Phase 5: Enterprise Features** | 📋 Planned | Q3-Q4 2026 |
 
-| Feature | Priority | Status | Description |
-|---------|----------|--------|-------------|
-| K3s Deployment | High | ✅ **Done** | Kustomize manifests for K3s/K8s |
-| Helm Charts | High | ⏳ Planned | Standardized deployments (Kustomize used instead) |
-| Horizontal Pod Autoscaling | Medium | ✅ **Done** | HPA on CPU/Memory for gateway + ingestion |
-| EMQX Clustering | High | ✅ **Done** | 3-node StatefulSet with DNS discovery |
-| TimescaleDB HA | Medium | ⏳ Planned | Patroni or managed service |
-| ConfigMaps/Secrets | High | ✅ **Done** | Externalized configuration per service |
-| Pod Disruption Budgets | Medium | ✅ **Done** | Safe rolling updates |
-| Service Accounts + RBAC | Medium | ✅ **Done** | Minimal permissions per service |
-
-> **Note**: We chose **Kustomize** over Helm for simplicity. Kustomize is built into kubectl and uses plain YAML with overlays. Helm can be added later if needed for public chart distribution.
-
-### Phase 3: Gateway Core & Management (Q2 2025)
-
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| Gateway Core Service | High | Device/tag management API |
-| PostgreSQL for Config | High | Persistent device configuration |
-| Dynamic Device Registration | High | Hot-reload of device config |
-| Web UI (Device Management) | Medium | React/Vue frontend |
-| RBAC Integration | Medium | Role-based access control |
-| Audit Logging | Medium | Change tracking |
-
-### Phase 4: Analytics & Advanced Features (Q2-Q3 2025)
-
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| Edge Aggregation | Medium | Pre-aggregate before historian |
-| Deadband Filtering | Medium | Reduce data volume |
-| Adaptive Polling | Low | Adjust intervals based on change rate |
-| SparkplugB Support | Low | Alternative payload format |
-| Anomaly Detection | Low | Real-time quality monitoring |
-| OEE Calculations | Medium | Overall Equipment Effectiveness |
-
-### Phase 5: Enterprise Features (Q3-Q4 2025)
-
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| Multi-Tenancy | Medium | Isolated customer environments |
-| Grafana Dashboards | Medium | Pre-built visualizations |
-| API Gateway | Medium | Rate limiting, auth, routing |
-| Backup/Restore | High | Data protection |
-| Disaster Recovery | Medium | Multi-site replication |
-| Compliance (ISA-95/OPC UA) | Low | Industry standards |
-
-### Architecture Evolution
+### Current Progress
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 1 (CURRENT)                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐  │
-│  │  Devices    │────>│  Protocol   │────>│    EMQX     │────>│   Data    │  │
-│  │             │     │  Gateway    │     │             │     │ Ingestion │  │
-│  └─────────────┘     └─────────────┘     └─────────────┘     └─────┬─────┘  │
-│                                                                    │        │
-│                                                              ┌─────▼──────┐ │
-│                                                              │TimescaleDB │ │
-│                                                              └────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 3+ (TARGET)                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌───────────┐  │
-│  │  Devices    │────>│  Protocol   │────>│    EMQX     │────>│   Data    │  │
-│  │             │     │  Gateway    │<───>│   Cluster   │     │ Ingestion │  │
-│  └─────────────┘     └──────▲──────┘     └──────┬──────┘     └─────┬─────┘  │
-│                             │                   │                  │        │
-│                      ┌──────▼──────┐            │            ┌─────▼──────┐ │
-│                      │  Gateway    │            │            │TimescaleDB │ │
-│                      │   Core      │            │            │   (HA)     │ │
-│                      └──────┬──────┘            │            └────────────┘ │
-│                             │                   │                           │
-│                      ┌──────▼──────┐     ┌──────▼──────┐                    │
-│                      │ PostgreSQL  │     │   Web UI    │                    │
-│                      │  (Config)   │     │ + API GW    │                    │
-│                      └─────────────┘     └─────────────┘                    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+Phase 1: Foundation          ████████████████████ 100% ✅
+Phase 2: Kubernetes          ████████████████░░░░  85% ✅
+Phase 3: Gateway Core        ░░░░░░░░░░░░░░░░░░░░   0% ⏳
+Phase 4: Analytics           ░░░░░░░░░░░░░░░░░░░░   0% 📋
+Phase 5: Enterprise          ░░░░░░░░░░░░░░░░░░░░   0% 📋
+─────────────────────────────────────────────────────────
+Total Progress               ████████░░░░░░░░░░░░  37%
 ```
+
+### What's Next (Phase 3)
+
+| Component | Priority | Description |
+|-----------|----------|-------------|
+| Gateway Core Service | 🔴 High | Device/tag management REST API |
+| PostgreSQL Config Store | 🔴 High | Persistent device configuration |
+| Dynamic Device Registration | 🔴 High | Hot-reload without restarts |
+| Web UI | 🟡 Medium | React/Vue administration interface |
+| Data Normalizer | 🟡 Medium | Unit conversion, scaling, clamping |
+
+See [ROADMAP.md](/ROADMAP.md) for complete details on all phases, architecture diagrams, and timeline.
 
 ---
 
