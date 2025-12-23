@@ -1,0 +1,41 @@
+# TimescaleDB - Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+
+---
+# Headless service for direct pod access
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-headless
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+

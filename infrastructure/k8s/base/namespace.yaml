@@ -1,0 +1,13 @@
+# NEXUS Edge Platform - Kubernetes Namespace
+# This namespace isolates all NEXUS components
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/part-of: nexus-edge
+    # Enable pod security standards (restricted for production)
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+

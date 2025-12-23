@@ -1,0 +1,106 @@
+# Development Overlay
+# Apply with: kubectl apply -k infrastructure/k8s/overlays/dev
+# This is optimized for local development (minikube, kind, Docker Desktop, K3s single-node)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nexus
+
+resources:
+  - ../../base
+  - ../../services/emqx
+  - ../../services/timescaledb
+  - ../../services/protocol-gateway
+  - ../../services/data-ingestion
+
+# Development-specific patches
+patches:
+  # Reduce EMQX replicas for dev (1 instead of 3)
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: StatefulSet
+      name: emqx
+  
+  # Reduce protocol-gateway replicas for dev
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: protocol-gateway
+  
+  # Reduce data-ingestion replicas for dev
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+    target:
+      kind: Deployment
+      name: data-ingestion
+  
+  # Lower resource requests for dev
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "100m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "128Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "512Mi"
+    target:
+      kind: Deployment
+      name: protocol-gateway
+  
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "100m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "128Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "512Mi"
+    target:
+      kind: Deployment
+      name: data-ingestion
+  
+  # Smaller storage for dev
+  - patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "5Gi"
+    target:
+      kind: StatefulSet
+      name: timescaledb
+  
+  - patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "2Gi"
+      - op: replace
+        path: /spec/volumeClaimTemplates/1/spec/resources/requests/storage
+        value: "1Gi"
+    target:
+      kind: StatefulSet
+      name: emqx
+
+# Disable HPA in dev (use fixed replicas)
+# Comment out if you want to test autoscaling locally
+patchesStrategicMerge: []
+
+commonLabels:
+  app.kubernetes.io/environment: development
+

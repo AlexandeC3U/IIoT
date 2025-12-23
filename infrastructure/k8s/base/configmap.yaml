@@ -1,0 +1,118 @@
+# NEXUS Edge Platform - Shared Configuration
+# ConfigMaps for non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-config
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  # MQTT Broker Configuration
+  MQTT_BROKER: "tcp://emqx:1883"
+  MQTT_CLIENT_ID_PREFIX: "nexus"
+  MQTT_QOS: "1"
+  
+  # Database Configuration
+  TIMESCALEDB_HOST: "timescaledb"
+  TIMESCALEDB_PORT: "5432"
+  TIMESCALEDB_DATABASE: "nexus_historian"
+  
+  # Logging
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  
+  # Health Check
+  HEALTH_CHECK_INTERVAL: "30s"
+
+---
+# Protocol Gateway specific config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: protocol-gateway-config
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  config.yaml: |
+    server:
+      port: 8080
+      healthPort: 8081
+    
+    mqtt:
+      broker: "${MQTT_BROKER}"
+      clientIdPrefix: "${MQTT_CLIENT_ID_PREFIX}-gateway"
+      qos: 1
+      keepAlive: 60s
+      connectTimeout: 30s
+      reconnectInterval: 5s
+    
+    polling:
+      defaultInterval: 1s
+      workers: 10
+      batchSize: 100
+    
+    protocols:
+      modbus:
+        enabled: true
+        timeout: 5s
+        retries: 3
+        poolSize: 10
+      opcua:
+        enabled: true
+        timeout: 10s
+        poolSize: 5
+      s7:
+        enabled: true
+        timeout: 5s
+        poolSize: 5
+    
+    circuitBreaker:
+      failureThreshold: 5
+      resetTimeout: 30s
+
+---
+# Data Ingestion specific config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-ingestion-config
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  config.yaml: |
+    server:
+      port: 8080
+      healthPort: 8081
+    
+    mqtt:
+      broker: "${MQTT_BROKER}"
+      clientIdPrefix: "${MQTT_CLIENT_ID_PREFIX}-ingestion"
+      qos: 1
+      # Shared subscriptions for load balancing
+      topics:
+        - "$share/ingestion/dev/#"
+        - "$share/ingestion/uns/#"
+    
+    database:
+      host: "${TIMESCALEDB_HOST}"
+      port: 5432
+      database: "${TIMESCALEDB_DATABASE}"
+      maxConnections: 20
+      minConnections: 5
+    
+    batching:
+      size: 5000
+      timeout: 1s
+      workers: 4
+    
+    buffer:
+      size: 50000
+      highWaterMark: 40000
+      lowWaterMark: 10000
+

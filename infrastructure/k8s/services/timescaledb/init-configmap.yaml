@@ -1,0 +1,85 @@
+# TimescaleDB - Initialization Scripts
+# These run once when the database is first created
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: timescaledb-init
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  # User creation script (runs first due to filename)
+  00-init-users.sql: |
+    -- Create database users
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_historian') THEN
+            CREATE ROLE nexus_historian WITH LOGIN PASSWORD 'nexus_dev';
+        END IF;
+    END
+    $$;
+    
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_ingestion') THEN
+            CREATE ROLE nexus_ingestion WITH LOGIN PASSWORD 'ingestion_password';
+        END IF;
+    END
+    $$;
+    
+    -- Basic permissions
+    GRANT CONNECT ON DATABASE nexus_historian TO nexus_ingestion;
+    GRANT CONNECT ON DATABASE nexus_historian TO nexus_historian;
+    GRANT USAGE ON SCHEMA public TO nexus_ingestion;
+    GRANT USAGE ON SCHEMA public TO nexus_historian;
+  
+  # Schema initialization (see config/timescaledb/init.sql for full version)
+  01-init-schema.sql: |
+    -- Enable TimescaleDB extension
+    CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+    
+    -- Main metrics hypertable
+    CREATE TABLE IF NOT EXISTS metrics (
+        time        TIMESTAMPTZ NOT NULL,
+        topic       TEXT NOT NULL,
+        device_id   TEXT,
+        tag_id      TEXT,
+        value       DOUBLE PRECISION,
+        value_str   TEXT,
+        quality     SMALLINT DEFAULT 192,
+        unit        TEXT,
+        metadata    JSONB,
+        received_at TIMESTAMPTZ DEFAULT NOW(),
+        CONSTRAINT metrics_value_check CHECK (value IS NOT NULL OR value_str IS NOT NULL)
+    );
+    
+    -- Convert to hypertable (if not already)
+    SELECT create_hypertable('metrics', 'time', 
+        chunk_time_interval => INTERVAL '1 day',
+        if_not_exists => TRUE
+    );
+    
+    -- Create indexes
+    CREATE INDEX IF NOT EXISTS idx_metrics_topic ON metrics (topic, time DESC);
+    CREATE INDEX IF NOT EXISTS idx_metrics_device ON metrics (device_id, time DESC) WHERE device_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_metrics_tag ON metrics (tag_id, time DESC) WHERE tag_id IS NOT NULL;
+    
+    -- Enable compression (chunks older than 7 days)
+    ALTER TABLE metrics SET (
+        timescaledb.compress,
+        timescaledb.compress_segmentby = 'topic',
+        timescaledb.compress_orderby = 'time DESC'
+    );
+    
+    SELECT add_compression_policy('metrics', INTERVAL '7 days', if_not_exists => TRUE);
+    
+    -- Retention policy (drop chunks older than 90 days)
+    SELECT add_retention_policy('metrics', INTERVAL '90 days', if_not_exists => TRUE);
+    
+    -- Grant permissions on tables
+    GRANT SELECT, INSERT ON metrics TO nexus_historian;
+    GRANT SELECT, INSERT ON metrics TO nexus_ingestion;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO nexus_ingestion;
+

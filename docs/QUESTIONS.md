@@ -24,7 +24,12 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 16. [Protocol Gateway: Best Practices and Performance](#1️⃣6️⃣-protocol-gateway-best-practices-and-performance)
 17. [Real-World Scaling: 1000 Devices Example](#1️⃣7️⃣-real-world-scaling-1000-devices-example)
 18. [Data Ingestion Service: Architecture & Scaling](#1️⃣8️⃣-data-ingestion-service-architecture--scaling)
-19. [Summary of Decisions](#summary-of-recommendations)
+19. [Security Considerations](#1️⃣9️⃣-security-considerations)
+20. [Performance Optimizations](#2️⃣0️⃣-performance-optimizations)
+21. [Development Roadmap](#21-development-roadmap)
+22. [Kubernetes vs K3s: Which to Use?](#22-kubernetes-vs-k3s-which-to-use)
+23. [Do We Need Terraform?](#23-do-we-need-terraform)
+24. [Summary of Recommendations](#summary-of-recommendations)
 
 ---
 
@@ -4456,14 +4461,18 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 
 ### Phase 2: Kubernetes & Scaling (Q1 2025)
 
-| Feature | Priority | Description |
-|---------|----------|-------------|
-| K3s Deployment | High | Lightweight Kubernetes for edge |
-| Helm Charts | High | Standardized deployments |
-| Horizontal Pod Autoscaling | Medium | Scale based on message queue |
-| EMQX Clustering | High | HA message broker |
-| TimescaleDB HA | Medium | Patroni or managed service |
-| ConfigMaps/Secrets | High | Externalized configuration |
+| Feature | Priority | Status | Description |
+|---------|----------|--------|-------------|
+| K3s Deployment | High | ✅ **Done** | Kustomize manifests for K3s/K8s |
+| Helm Charts | High | ⏳ Planned | Standardized deployments (Kustomize used instead) |
+| Horizontal Pod Autoscaling | Medium | ✅ **Done** | HPA on CPU/Memory for gateway + ingestion |
+| EMQX Clustering | High | ✅ **Done** | 3-node StatefulSet with DNS discovery |
+| TimescaleDB HA | Medium | ⏳ Planned | Patroni or managed service |
+| ConfigMaps/Secrets | High | ✅ **Done** | Externalized configuration per service |
+| Pod Disruption Budgets | Medium | ✅ **Done** | Safe rolling updates |
+| Service Accounts + RBAC | Medium | ✅ **Done** | Minimal permissions per service |
+
+> **Note**: We chose **Kustomize** over Helm for simplicity. Kustomize is built into kubectl and uses plain YAML with overlays. Helm can be added later if needed for public chart distribution.
 
 ### Phase 3: Gateway Core & Management (Q2 2025)
 
@@ -4539,6 +4548,213 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 
 ---
 
+## 22. Kubernetes vs K3s: Which to Use?
+
+**Question:** What's the difference between K8s and K3s, and which should NEXUS use?
+
+**Answer:** **Both!** The manifests are compatible with both. K3s is recommended for edge deployments.
+
+### K8s vs K3s Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         KUBERNETES vs K3S COMPARISON                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  KUBERNETES (K8s)                         K3S                               │
+│  ─────────────────                        ────                              │
+│  • Full-featured orchestrator             • Lightweight K8s distribution    │
+│  • ~1GB+ binary (multiple components)     • <100MB single binary            │
+│  • 2-4GB RAM minimum                      • 512MB RAM minimum               │
+│  • Requires etcd cluster                  • Built-in SQLite (or etcd)       │
+│  • Complex setup                          • curl | sh - one-liner install   │
+│  • Best for: Cloud, data centers          • Best for: Edge, IoT, ARM        │
+│                                                                             │
+│  API COMPATIBILITY: 100% - Same kubectl, same manifests, same Helm charts   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why K3s for NEXUS Edge?
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        WHY K3S FOR EDGE DEPLOYMENT                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Industrial Edge Hardware Constraints:                                      │
+│  ├── 4-16GB RAM typical                                                     │
+│  ├── Limited disk space                                                     │
+│  ├── Sometimes ARM CPUs (Raspberry Pi, Jetson)                              │
+│  └── Air-gapped networks                                                    │
+│                                                                             │
+│  K3s Advantages:                                                            │
+│  ├──  Runs on low-spec hardware                                             │
+│  ├──  Single binary (no Docker dependency with containerd)                  │
+│  ├──  Built-in Traefik ingress (no extra setup)                             │
+│  ├──  SQLite for single-node (no etcd cluster needed)                       │
+│  ├──  Built-in local-path provisioner (PVCs work out of box)                │
+│  └──  CNCF certified - production-grade Kubernetes                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Deployment Environments
+
+| Environment | Kubernetes | Why |
+|-------------|------------|-----|
+| **Local Dev** | K3s / minikube / kind | Lightweight, fast startup |
+| **Edge Production** | **K3s** | Low footprint, single binary |
+| **Cloud Production** | AKS / EKS / GKE | Managed, enterprise support |
+| **On-Prem Data Center** | K8s (kubeadm) | Full control, HA setup |
+
+### K3s Quick Install
+
+```bash
+# Single-node install (30 seconds)
+curl -sfL https://get.k3s.io | sh -
+
+# Verify
+kubectl get nodes
+
+# Deploy NEXUS
+kubectl apply -k infrastructure/k8s/overlays/dev
+```
+
+### Multi-Node K3s Cluster
+
+```bash
+# Server node (control plane)
+curl -sfL https://get.k3s.io | sh -s - server --cluster-init
+
+# Get token
+cat /var/lib/rancher/k3s/server/node-token
+
+# Agent nodes (workers)
+curl -sfL https://get.k3s.io | sh -s - agent \
+  --server https://<SERVER_IP>:6443 \
+  --token <NODE_TOKEN>
+```
+
+### NEXUS K8s Directory Structure
+
+```
+infrastructure/k8s/
+├── base/                    # Shared ConfigMaps, Secrets, Namespace
+├── services/                # Per-service manifests
+│   ├── protocol-gateway/    # Deployment, Service, HPA
+│   ├── data-ingestion/      # Deployment, Service, HPA
+│   ├── emqx/                # StatefulSet (clustered)
+│   └── timescaledb/         # StatefulSet with PVC
+└── overlays/
+    ├── dev/                 # Low resources, 1 replica
+    └── prod/                # HA, autoscaling, production secrets
+```
+
+### Key Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Target platform** | K3s | Edge-first, low footprint |
+| **Manifest format** | Kustomize | No Helm dependency, overlays for env |
+| **EMQX HA** | StatefulSet + DNS discovery | Native Erlang clustering |
+| **TimescaleDB HA** | Single node (Phase 1) | Patroni for Phase 2 |
+| **Autoscaling** | HPA on CPU/Memory | Simple, works on K3s |
+| **Secrets** | Base64 (dev) → Vault (prod) | External secrets for production |
+
+---
+
+## 23. Do We Need Terraform?
+
+**Question:** Should we use Terraform for NEXUS Edge?
+
+**Answer:** **Not for most deployments.** Terraform is for infrastructure provisioning, not application deployment.
+
+### What Terraform Does vs What We Need
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     TERRAFORM vs KUBERNETES/KUSTOMIZE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TERRAFORM (Infrastructure as Code)                                         │
+│  ═══════════════════════════════════                                        │
+│  Creates and manages:                                                       │
+│  • Cloud VMs (AWS EC2, Azure VMs, GCP Compute)                              │
+│  • Managed Kubernetes clusters (AKS, EKS, GKE)                              │
+│  • Networking (VPCs, subnets, firewalls)                                    │
+│  • Databases (RDS, Cloud SQL)                                               │
+│  • Storage (S3, Azure Blob)                                                 │
+│  • DNS, Load Balancers, etc.                                                │
+│                                                                             │
+│  KUBERNETES/KUSTOMIZE (Application Deployment)                              │
+│  ═════════════════════════════════════════════                              │
+│  Creates and manages:                                                       │
+│  • Pods, Deployments, StatefulSets                                          │
+│  • Services, Ingresses                                                      │
+│  • ConfigMaps, Secrets                                                      │
+│  • HPAs, PDBs                                                               │
+│  • RBAC, ServiceAccounts                                                    │
+│                                                                             │
+│  NEXUS Edge Focus:                                                          │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Edge Server (on-premise)                                           │    │
+│  │  • K3s installed manually or via script                             │    │
+│  │  • NEXUS deployed via: kubectl apply -k overlays/prod               │    │
+│  │  • No cloud infrastructure to provision                             │    │
+│  │  • Terraform NOT needed                                             │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### When Would Terraform Be Useful?
+
+| Scenario | Terraform Needed? | Why |
+|----------|-------------------|-----|
+| **Edge deployment (on-premise)** | ❌ No | Hardware exists, just install K3s |
+| **Cloud K8s cluster (AKS/EKS/GKE)** | ✅ Yes | Provision the cluster itself |
+| **Managed databases (RDS)** | ✅ Yes | Provision cloud database |
+| **Multi-cloud fleet** | ✅ Yes | Consistent infra across providers |
+| **Air-gapped edge** | ❌ No | No cloud, no Terraform |
+
+### NEXUS Deployment Stack
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      NEXUS DEPLOYMENT STACK                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  LAYER 1: Infrastructure (Optional - only for cloud)                        │
+│  ══════════════════════════════════════════════════                         │
+│  Tool: Terraform (or cloud console)                                         │
+│  Creates: VMs, K8s cluster, networking                                      │
+│                                                                             │
+│  LAYER 2: Kubernetes Cluster                                                │
+│  ══════════════════════════════                                             │
+│  Tool: K3s installer (edge) or Terraform (cloud)                            │
+│  Creates: Kubernetes control plane + workers                                │
+│                                                                             │
+│  LAYER 3: NEXUS Application  ◄── This is what we've built!                  │
+│  ════════════════════════════                                               │
+│  Tool: Kustomize (kubectl apply -k)                                         │
+│  Creates: EMQX, TimescaleDB, Protocol Gateway, Data Ingestion               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Recommendation
+
+| Deployment Type | Tools |
+|----------------|-------|
+| **Edge (most common)** | K3s + Kustomize (what we have) |
+| **Cloud (if needed later)** | Terraform + Kustomize |
+| **Hybrid (edge + cloud)** | Terraform for cloud, Kustomize for apps |
+
+**Bottom line**: Terraform is overkill for NEXUS Edge. Our Kustomize manifests are sufficient. If you later need to provision cloud infrastructure (e.g., managed Kubernetes on Azure), Terraform would be added at that layer — but it wouldn't replace Kustomize.
+
+---
+
 ## Summary of Recommendations
 
 | Question | Decision |
@@ -4564,6 +4780,9 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 | **Security** | Development-ready; TLS, auth, ACLs required for production |
 | **Performance** | Object pooling, retry logic, batch optimization implemented |
 | **Roadmap** | 5 phases from Foundation (done) to Enterprise features |
+| **K8s vs K3s** | K3s for edge (lightweight), manifests work on both |
+| **Terraform** | Not needed for edge; use for cloud infrastructure only |
+| **Phase 2 Status** | K8s manifests ✅, HPA ✅, EMQX cluster ✅, ConfigMaps ✅ |
 
 ---
 

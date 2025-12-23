@@ -1,0 +1,24 @@
+# Data Ingestion Service - Kubernetes Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-ingestion
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/component: ingestion
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: data-ingestion
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: health
+      port: 8081
+      targetPort: health
+      protocol: TCP
+

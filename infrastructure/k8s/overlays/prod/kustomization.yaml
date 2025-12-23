@@ -1,0 +1,108 @@
+# Production Overlay
+# Apply with: kubectl apply -k infrastructure/k8s/overlays/prod
+# This is optimized for production edge deployments
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nexus
+
+resources:
+  - ../../base
+  - ../../services/emqx
+  - ../../services/timescaledb
+  - ../../services/protocol-gateway
+  - ../../services/data-ingestion
+
+# Production-specific patches
+patches:
+  # Production replicas (3 EMQX nodes for HA)
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: StatefulSet
+      name: emqx
+  
+  # Production replicas for protocol-gateway
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+    target:
+      kind: Deployment
+      name: protocol-gateway
+  
+  # Production replicas for data-ingestion
+  - patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+    target:
+      kind: Deployment
+      name: data-ingestion
+  
+  # Production resources for protocol-gateway
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "512Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "2000m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "2Gi"
+    target:
+      kind: Deployment
+      name: protocol-gateway
+  
+  # Production resources for data-ingestion
+  - patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "512Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "2000m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "2Gi"
+    target:
+      kind: Deployment
+      name: data-ingestion
+  
+  # Production storage for TimescaleDB
+  - patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "500Gi"
+    target:
+      kind: StatefulSet
+      name: timescaledb
+  
+  # Production storage for EMQX
+  - patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "20Gi"
+      - op: replace
+        path: /spec/volumeClaimTemplates/1/spec/resources/requests/storage
+        value: "10Gi"
+    target:
+      kind: StatefulSet
+      name: emqx
+
+commonLabels:
+  app.kubernetes.io/environment: production
+
+# Production-specific annotations
+commonAnnotations:
+  prometheus.io/scrape: "true"
+

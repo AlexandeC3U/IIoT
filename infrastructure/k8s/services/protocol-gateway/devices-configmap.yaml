@@ -1,0 +1,73 @@
+# Protocol Gateway - Device Configuration
+# In production, this would be managed via the Gateway Core API
+# For now, devices are configured via ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: protocol-gateway-devices
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  devices.yaml: |
+    # Device configuration for Protocol Gateway
+    # Format: List of devices with their tags
+    
+    devices:
+      # Example Modbus device
+      - id: "plc-001"
+        name: "Production Line 1 PLC"
+        protocol: "modbus"
+        enabled: true
+        connection:
+          host: "192.168.1.10"
+          port: 502
+          unitId: 1
+          timeout: "5s"
+        mqtt:
+          topicPrefix: "uns/plant/line1/plc001"
+        polling:
+          interval: "1s"
+        tags:
+          - id: "temperature"
+            name: "Temperature Sensor"
+            address: "holding:40001:float32"
+            unit: "°C"
+            scaling:
+              factor: 0.1
+              offset: 0
+          - id: "pressure"
+            name: "Pressure Sensor"  
+            address: "holding:40003:float32"
+            unit: "bar"
+          - id: "running"
+            name: "Running Status"
+            address: "coil:00001"
+            unit: ""
+      
+      # Example OPC UA device
+      - id: "opc-001"
+        name: "OPC UA Server 1"
+        protocol: "opcua"
+        enabled: true
+        connection:
+          endpoint: "opc.tcp://192.168.1.20:4840"
+          securityPolicy: "None"
+          securityMode: "None"
+          timeout: "10s"
+        mqtt:
+          topicPrefix: "uns/plant/line1/opcua"
+        polling:
+          interval: "500ms"
+        tags:
+          - id: "motor_speed"
+            name: "Motor Speed"
+            address: "ns=2;s=Motor.Speed"
+            unit: "RPM"
+          - id: "motor_current"
+            name: "Motor Current"
+            address: "ns=2;s=Motor.Current"
+            unit: "A"
+

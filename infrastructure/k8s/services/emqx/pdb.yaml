@@ -1,0 +1,18 @@
+# EMQX - Pod Disruption Budget
+# Ensures cluster quorum during voluntary disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: emqx
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  # For 3 node cluster, allow max 1 unavailable to maintain quorum
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+

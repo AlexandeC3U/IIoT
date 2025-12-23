@@ -1,0 +1,89 @@
+# EMQX MQTT Broker - Services
+# Main service for client connections
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: emqx
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+      protocol: TCP
+    - name: mqtts
+      port: 8883
+      targetPort: mqtts
+      protocol: TCP
+    - name: ws
+      port: 8083
+      targetPort: ws
+      protocol: TCP
+    - name: wss
+      port: 8084
+      targetPort: wss
+      protocol: TCP
+    - name: dashboard
+      port: 18083
+      targetPort: dashboard
+      protocol: TCP
+
+---
+# Headless service for cluster discovery and pod-to-pod communication
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-headless
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: emqx
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
+    - name: ekka
+      port: 4370
+      targetPort: ekka
+    - name: erlang
+      port: 5370
+      targetPort: erlang
+
+---
+# LoadBalancer service for external MQTT access (if needed)
+# Uncomment for external access from devices outside the cluster
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: emqx-external
+#   namespace: nexus
+#   labels:
+#     app.kubernetes.io/name: emqx
+#     app.kubernetes.io/component: broker
+#     app.kubernetes.io/part-of: nexus-edge
+# spec:
+#   type: LoadBalancer
+#   selector:
+#     app.kubernetes.io/name: emqx
+#   ports:
+#     - name: mqtt
+#       port: 1883
+#       targetPort: mqtt
+#     - name: mqtts
+#       port: 8883
+#       targetPort: mqtts
+

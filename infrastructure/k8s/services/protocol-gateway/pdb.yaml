@@ -1,0 +1,17 @@
+# Protocol Gateway - Pod Disruption Budget
+# Ensures minimum availability during voluntary disruptions (upgrades, node drains)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: protocol-gateway
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: protocol-gateway
+

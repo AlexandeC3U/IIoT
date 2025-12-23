@@ -1,0 +1,16 @@
+# TimescaleDB - Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nexus
+
+resources:
+  - serviceaccount.yaml
+  - init-configmap.yaml
+  - statefulset.yaml
+  - service.yaml
+
+commonLabels:
+  app.kubernetes.io/name: timescaledb
+  app.kubernetes.io/component: database
+

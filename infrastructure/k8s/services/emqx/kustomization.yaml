@@ -1,0 +1,16 @@
+# EMQX MQTT Broker - Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nexus
+
+resources:
+  - serviceaccount.yaml
+  - statefulset.yaml
+  - service.yaml
+  - pdb.yaml
+
+commonLabels:
+  app.kubernetes.io/name: emqx
+  app.kubernetes.io/component: broker
+

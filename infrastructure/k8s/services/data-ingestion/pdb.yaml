@@ -1,0 +1,17 @@
+# Data Ingestion - Pod Disruption Budget
+# Ensures minimum availability during voluntary disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: data-ingestion
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/component: ingestion
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-ingestion
+

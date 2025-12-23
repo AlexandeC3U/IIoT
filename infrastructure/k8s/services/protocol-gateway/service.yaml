@@ -1,0 +1,45 @@
+# Protocol Gateway - Kubernetes Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: protocol-gateway
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: protocol-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: health
+      port: 8081
+      targetPort: health
+      protocol: TCP
+
+---
+# Headless service for direct pod access (useful for debugging)
+apiVersion: v1
+kind: Service
+metadata:
+  name: protocol-gateway-headless
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: protocol-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
