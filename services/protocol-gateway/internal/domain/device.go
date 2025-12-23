@@ -10,11 +10,11 @@ import (
 type DeviceStatus string
 
 const (
-	DeviceStatusOnline      DeviceStatus = "online"
-	DeviceStatusOffline     DeviceStatus = "offline"
-	DeviceStatusConnecting  DeviceStatus = "connecting"
-	DeviceStatusError       DeviceStatus = "error"
-	DeviceStatusUnknown     DeviceStatus = "unknown"
+	DeviceStatusOnline     DeviceStatus = "online"
+	DeviceStatusOffline    DeviceStatus = "offline"
+	DeviceStatusConnecting DeviceStatus = "connecting"
+	DeviceStatusError      DeviceStatus = "error"
+	DeviceStatusUnknown    DeviceStatus = "unknown"
 )
 
 // Protocol represents the communication protocol type.
@@ -140,6 +140,13 @@ type ConnectionConfig struct {
 	// OPCSamplingInterval is the sampling interval for OPC UA monitored items
 	OPCSamplingInterval time.Duration `json:"opc_sampling_interval,omitempty" yaml:"opc_sampling_interval,omitempty"`
 
+	// OPCUseSubscriptions enables OPC UA subscriptions (Report-by-Exception) instead of polling.
+	// When true, the server pushes data changes to the client, which is more efficient
+	// for slow-changing values. Requires OPCPublishInterval and OPCSamplingInterval.
+	// NOTE: Not yet implemented - planned for Phase 3 (Gateway Core).
+	// Currently all OPC UA devices use polling.
+	OPCUseSubscriptions bool `json:"opc_use_subscriptions,omitempty" yaml:"opc_use_subscriptions,omitempty"`
+
 	// === S7 (Siemens) Settings ===
 
 	// S7Rack is the rack number of the PLC (usually 0)
@@ -185,4 +192,3 @@ func (d *Device) GetAddress() string {
 	}
 	return d.Connection.SerialPort
 }
-

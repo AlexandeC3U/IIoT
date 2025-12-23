@@ -114,7 +114,7 @@ Build a **lightweight, scalable, and production-ready** Industrial IoT platform 
 ## Phase 2: Kubernetes & Scaling ✅
 
 **Timeline**: December 2025 - January 2026  
-**Status**: **85% COMPLETE**
+**Status**: **95% COMPLETE**
 
 ### Goals
 - Production-ready container orchestration
@@ -136,8 +136,22 @@ Build a **lightweight, scalable, and production-ready** Industrial IoT platform 
 | **Pod Disruption Budgets** | ✅ Complete | Safe rolling updates |
 | **Service Accounts + RBAC** | ✅ Complete | Minimal permissions |
 | **Environment Overlays** | ✅ Complete | Dev/Prod configurations |
-| **TimescaleDB HA** | ⏳ Planned | Patroni or managed service |
+| **OPC UA Subscriptions** | 📝 Documented | Config flag added, full integration Phase 3 |
+| **TimescaleDB HA** | ⏸️ Not Needed | Single instance sufficient for edge (see below) |
 | **Helm Charts** | ⏸️ Deferred | Kustomize sufficient for now |
+
+### Why TimescaleDB HA is Not Needed
+
+For edge deployments, a single TimescaleDB instance is **sufficient**:
+- Data persists on PVC (survives pod restarts)
+- Kubernetes restarts failed pods automatically (~10-30 seconds)
+- Data Ingestion buffers messages during brief outages
+- HA adds complexity (Patroni) without proportional benefit for edge
+
+**When to consider HA:**
+- 99.99% uptime SLA requirements
+- Multi-site replication needed
+- Heavy concurrent query load (read replicas)
 
 ### Deployment Commands
 
@@ -195,7 +209,7 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 
 ### Goals
 - Centralized device configuration management
-- Web-based administration UI
+- **Unified Web UI** (single app for all management)
 - Dynamic device registration (hot-reload)
 - Role-based access control
 
@@ -203,17 +217,19 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 
 | Component | Priority | Description |
 |-----------|----------|-------------|
-| **Gateway Core Service** | 🔴 High | Central management API (Go or TypeScript) |
+| **Gateway Core Service** | 🔴 High | Central management API (TypeScript/Fastify) |
 | ├─ Device CRUD API | 🔴 High | REST API for device management |
 | ├─ Tag CRUD API | 🔴 High | REST API for tag configuration |
 | ├─ Configuration Store | 🔴 High | PostgreSQL for persistent config |
-| └─ MQTT Notifications | 🔴 High | Publish config changes to gateways |
-| **Web UI** | 🟡 Medium | React/Vue frontend for administration |
-| ├─ Device List/Grid | 🟡 Medium | View all connected devices |
-| ├─ Device Editor | 🟡 Medium | Add/edit device configurations |
-| ├─ Tag Browser | 🟡 Medium | Browse and configure tags |
-| ├─ Connection Status | 🟡 Medium | Real-time device health |
-| └─ Metrics Dashboard | 🟡 Medium | Polling stats, throughput |
+| ├─ MQTT Notifications | 🔴 High | Publish config changes to gateways |
+| └─ WebSocket Gateway | 🟡 Medium | Real-time updates to UI |
+| **Unified Web UI (React)** | 🔴 High | Single app for ALL management |
+| ├─ Device List/Grid | 🔴 High | View all connected devices |
+| ├─ Device Editor | 🔴 High | Add/edit device configurations |
+| ├─ Tag Browser | 🔴 High | Browse and configure tags |
+| ├─ Connection Status | 🔴 High | Real-time device health (WebSocket) |
+| ├─ System Overview | 🟡 Medium | Polling stats, message throughput |
+| └─ Navigation Shell | 🔴 High | Shared layout for all future features |
 | **Data Normalizer** | 🟡 Medium | Transformation pipeline |
 | ├─ Unit Conversion | 🟡 Medium | °F → °C, bar → psi, etc. |
 | ├─ Value Clamping | 🟡 Medium | Min/max limits |
@@ -222,6 +238,89 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 | **Authentication** | 🟡 Medium | JWT tokens, API keys |
 | **RBAC** | 🟡 Medium | Role-based permissions |
 | **Audit Logging** | 🟡 Medium | Track configuration changes |
+
+### Unified UI Vision
+
+The Web UI is designed as a **single React application** that grows with each phase:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    UNIFIED WEB UI - PROGRESSIVE FEATURES                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  PHASE 3 (This phase):                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Navigation: [Devices] [System]                                     │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │  Device Management                                                  │    │
+│  │  ├── Device list with search/filter                                 │    │
+│  │  ├── Add/Edit device wizard                                         │    │
+│  │  ├── Tag configuration (addresses, scaling)                         │    │
+│  │  ├── Real-time connection status (🟢 online / 🔴 offline)          │    │
+│  │  └── Device health metrics (poll success rate, latency)             │    │
+│  │                                                                     │    │
+│  │  System Overview                                                    │    │
+│  │  ├── Gateway instances status                                       │    │
+│  │  ├── MQTT broker health                                             │    │
+│  │  └── Basic metrics (msgs/sec, active devices)                       │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  PHASE 4 (Adds to same UI):                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Navigation: [Devices] [Dashboards] [Historian] [Alerts] [System]   │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │  Dashboard Builder                                                  │    │
+│  │  ├── Drag-drop widget grid                                          │    │
+│  │  ├── Widget library (gauges, charts, tables)                        │    │
+│  │  ├── Real-time data bindings (MQTT → widgets)                       │    │
+│  │  └── Kiosk/fullscreen mode                                          │    │
+│  │                                                                     │    │
+│  │  Historian Explorer                                                 │    │
+│  │  ├── Visual query builder (tag picker, time range)                  │    │
+│  │  ├── Interactive trend charts                                       │    │
+│  │  └── Data export (CSV, JSON)                                        │    │
+│  │                                                                     │    │
+│  │  Alert Management                                                   │    │
+│  │  └── Rule configuration (thresholds, notifications)                 │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  PHASE 5 (Adds to same UI):                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Nav: [Devices] [Dashboards] [Flows] [Historian] [Containers] [...] │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │  Container/Pod Management                                           │    │
+│  │  ├── List all containers/pods with status                           │    │
+│  │  ├── CPU, Memory, Network metrics per container                     │    │
+│  │  ├── Real-time log streaming                                        │    │
+│  │  ├── Start/Stop/Restart actions                                     │    │
+│  │  ├── Scale replicas (for K8s deployments)                           │    │
+│  │  └── Deploy new containers via wizard                               │    │
+│  │                                                                     │    │
+│  │  Visual Flow Designer (Node-RED alternative)                        │    │
+│  │  ├── Custom React Flow canvas (not iframe)                          │    │
+│  │  ├── Drag devices from sidebar onto canvas                          │    │
+│  │  ├── Pre-built nodes (transform, filter, aggregate)                 │    │
+│  │  ├── MQTT input/output nodes                                        │    │
+│  │  └── Deploy flows to Gateway                                        │    │
+│  │                                                                     │    │
+│  │  User Management                                                    │    │
+│  │  ├── Create/edit users                                              │    │
+│  │  ├── Assign roles (Admin, Engineer, Operator)                       │    │
+│  │  └── Audit log viewer                                               │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why One Unified UI?
+
+| Benefit | Description |
+|---------|-------------|
+| **Consistent UX** | Same design language, navigation, and interactions everywhere |
+| **Shared state** | User session, auth tokens, and preferences shared across features |
+| **Faster development** | Reuse components (tables, forms, charts) across features |
+| **Better integration** | Devices, dashboards, and flows can reference each other |
+| **Simpler deployment** | One container for the entire frontend |
 
 ### Architecture (Phase 3)
 
@@ -356,12 +455,13 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 
 ## Phase 5: Enterprise Features 📋
 
-**Timeline**: Q3-Q4 2025  
+**Timeline**: Q3-Q4 2026  
 **Status**: PLANNED
 
 ### Goals
 - Production hardening
-- Multi-customer support
+- Container/Pod management in UI
+- Visual flow designer (Node-RED alternative)
 - Operational visibility
 - Compliance and standards
 
@@ -369,19 +469,28 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 
 | Component | Priority | Description |
 |-----------|----------|-------------|
+| **Container/Pod Management** | 🔴 High | Full K8s/Docker management in UI |
+| ├─ Container List | 🔴 High | All pods/containers with status |
+| ├─ Resource Metrics | 🔴 High | CPU, Memory, Network per container |
+| ├─ Log Streaming | 🔴 High | Real-time log viewer |
+| ├─ Actions | 🔴 High | Start, Stop, Restart, Scale |
+| ├─ Deploy Wizard | 🟡 Medium | Deploy new containers from UI |
+| └─ **App Catalog** | 🟡 Medium | Pre-configured apps (Grafana, ML, etc.) |
+| **Custom Container Deployment** | 🟡 Medium | Deploy any Docker image |
+| ├─ Image Registry Support | 🟡 Medium | Docker Hub, GHCR, private registries |
+| ├─ Resource Configuration | 🟡 Medium | CPU/Memory limits, replicas |
+| ├─ Environment Variables | 🟡 Medium | Plaintext and secrets |
+| ├─ Port Mapping | 🟡 Medium | Expose services |
+| └─ Volume Mounts | 🟢 Low | Persistent storage for custom apps |
+| **Visual Flow Designer** | 🟡 Medium | Node-RED alternative (custom React Flow) |
+| ├─ Flow Canvas | 🟡 Medium | Drag-drop node editor |
+| ├─ Node Library | 🟡 Medium | Transform, filter, aggregate, MQTT |
+| ├─ Device Integration | 🟡 Medium | Drag devices onto canvas |
+| └─ Flow Deployment | 🟡 Medium | Deploy to Gateway runtime |
 | **Multi-Tenancy** | 🟡 Medium | Isolated customer environments |
 | ├─ Namespace Isolation | 🟡 Medium | Separate K8s namespaces |
 | ├─ Data Isolation | 🟡 Medium | Tenant-aware queries |
 | └─ Resource Quotas | 🟡 Medium | Per-tenant limits |
-| **Grafana Dashboards** | 🟡 Medium | Pre-built visualizations |
-| ├─ Device Overview | 🟡 Medium | Health, status, connectivity |
-| ├─ Performance Metrics | 🟡 Medium | Throughput, latency |
-| ├─ Historical Trending | 🟡 Medium | Time-series visualization |
-| └─ Alerting Rules | 🟡 Medium | Prometheus alerts |
-| **API Gateway** | 🟡 Medium | Central API management |
-| ├─ Rate Limiting | 🟡 Medium | Prevent abuse |
-| ├─ Authentication | 🟡 Medium | OAuth2, API keys |
-| └─ Request Routing | 🟡 Medium | Version-based routing |
 | **Security Hardening** | 🔴 High | Production security |
 | ├─ TLS Everywhere | 🔴 High | MQTT, HTTP, DB connections |
 | ├─ Secret Management | 🔴 High | HashiCorp Vault or K8s secrets |
@@ -395,6 +504,148 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 | ├─ ISA-95 Data Model | 🟢 Low | Standard hierarchy |
 | ├─ OPC UA Information Model | 🟢 Low | Standard node structure |
 | └─ Audit Trails | 🟡 Medium | Complete change history |
+
+### Container Management UI
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CONTAINER/POD MANAGEMENT                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │ Running Containers                                 [+ Deploy New]   │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                     │    │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │    │
+│  │  │ protocol-gateway                                             │   │    │
+│  │  │ ─────────────────────────────────────────────────────────────│   │    │
+│  │  │ Image: nexus/protocol-gateway:1.0.0      Uptime: 14d 3h 22m  │   │    │
+│  │  │ CPU: ████████░░ 78%              Memory: ██████░░░░ 256MB    │   │    │
+│  │  │ Pods: 3/3 ready                  Restarts: 0                 │   │    │
+│  │  │                                                              │   │    │
+│  │  │ [ 📋 Logs ]  [ 🔄 Restart ]  [ ⚙️ Config ]  [ 📈 Scale Up ]│   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                     │    │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │    │
+│  │  │  emqx (StatefulSet)                                          │   │    │
+│  │  │ ─────────────────────────────────────────────────────────────│   │    │
+│  │  │ Image: emqx/emqx:5.8.0                   Uptime: 14d 3h 22m  │   │    │
+│  │  │ CPU: ██████░░░░ 55%              Memory: ████████░░ 512MB    │   │    │
+│  │  │ Replicas: 3/3                    Active Connections: 12,543  │   │    │
+│  │  │                                                              │   │    │
+│  │  │ [ 📋 Logs ]  [ 🔄 Restart ]  [ ⚙️ Config ]  [ 📊 Metrics ] │   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                     │    │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │    │
+│  │  │ custom-python-ml (High Memory)                               │   │    │
+│  │  │ ─────────────────────────────────────────────────────────────│   │    │
+│  │  │ Image: ghcr.io/user/ml-model:v2.1        Uptime: 2d 5h 12m   │   │    │
+│  │  │ CPU: ████░░░░░░ 35%              Memory: █████████░ 1.8GB    │   │    │
+│  │  │ Pods: 1/1                        GPU: 1x RTX 3080            │   │    │
+│  │  │                                                              │   │    │
+│  │  │ [ 📋 Logs ]  [ 🔄 Restart ]  [ ⚙️ Config ]  [ 🗑️ Delete ]  │   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Real-time metrics via Kubernetes Metrics API or Docker stats API           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### App Catalog & Custom Deployment
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         APP CATALOG + CUSTOM DEPLOYMENT                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │ App Catalog                                       [Add Custom ▼]    │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                     │    │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │    │
+│  │  │            │  │            │  │            │  │            │     │    │
+│  │  │  Grafana   │  │  Python    │  │  Jupyter   │  │  InfluxDB  │     │    │
+│  │  │            │  │  ML        │  │  Notebook  │  │  Bridge    │     │    │
+│  │  │            │  │            │  │            │  │            │     │    │
+│  │  │ [Deploy]   │  │ [Deploy]   │  │ [Deploy]   │  │ [Deploy]   │     │    │
+│  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │    │
+│  │                                                                     │    │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │    │
+│  │  │            │  │            │  │            │  │            │     │    │
+│  │  │  Node-RED  │  │  Alerting  │  │  MQTT      │  │  Custom    │     │    │
+│  │  │  (Legacy)  │  │  Engine    │  │  Explorer  │  │  Image...  │     │    │
+│  │  │            │  │            │  │            │  │            │     │    │
+│  │  │ [Deploy]   │  │ [Deploy]   │  │ [Deploy]   │  │ [Deploy]   │     │    │
+│  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │    │
+│  │                                                                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  Clicking "Custom Image..." opens the deployment wizard:                    │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Deploy Custom Container                                            │    │
+│  ├─────────────────────────────────────────────────────────────────────┤    │
+│  │                                                                     │    │
+│  │  Image*        [ ghcr.io/myorg/my-app:v1.0.0              ]         │    │
+│  │  Name*         [ my-custom-app                            ]         │    │
+│  │  Replicas      [ 1 ▼]                                               │    │
+│  │                                                                     │    │
+│  │  ┌─ Resource Limits ────────────────────────────────────────────┐   │    │
+│  │  │  CPU Request: [ 100m  ]   CPU Limit: [ 500m  ]               │   │    │
+│  │  │  Mem Request: [ 128Mi ]   Mem Limit: [ 512Mi ]               │   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                     │    │
+│  │  ┌─ Environment Variables ──────────────────────────────────────┐   │    │
+│  │  │  MQTT_BROKER    = [ emqx.nexus.svc.cluster.local ]           │   │    │
+│  │  │  MY_SECRET      = [ ●●●●●●●● ]  from Secret                  │   │    │
+│  │  │  [+ Add Variable]                                            │   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                     │    │
+│  │  ┌─ Ports ──────────────────────────────────────────────────────┐   │    │
+│  │  │  Container: [ 8080 ]  Service: [ 8080 ]  Type: [ ClusterIP ▼]│   │    │
+│  │  │  [+ Add Port]                                                │   │    │
+│  │  └──────────────────────────────────────────────────────────────┘   │    │
+│  │                                                                     │    │
+│  │  ☐ Enable Ingress (external access)                                │    │
+│  │  ☑ Connect to MQTT broker                                          │    │
+│  │  ☐ Mount persistent volume                                         │    │
+│  │                                                                     │    │
+│  │                              [ Cancel ]  [  Deploy ]                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+
+### Visual Flow Designer (Not Node-RED Iframe)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    VISUAL FLOW DESIGNER                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────┐  ┌────────────────────────────────────────────────────┐   │
+│  │ Devices      │  │                  FLOW CANVAS                       │   │
+│  │──────────────│  │                                                    │   │
+│  │ - PLC-001    │  │   ┌─────────┐      ┌─────────┐      ┌─────────┐    │   │
+│  │ - PLC-002    │  │   │ Device  │──────│Transform│──────│  MQTT   │    │   │
+│  │ - OPC-001    │  │   │ PLC-001 │      │  ×1.5   │      │ Publish │    │   │
+│  │              │  │   └─────────┘      └─────────┘      └─────────┘    │   │
+│  │ Nodes        │  │                                                    │   │
+│  │──────────────│  │   ┌─────────┐      ┌─────────┐                     │   │
+│  │ - Transform  │  │   │  MQTT   │──────│ Filter  │──────► ...          │   │
+│  │ - Filter     │  │   │Subscribe│      │ >100    │                     │   │
+│  │ - Aggregate  │  │   └─────────┘      └─────────┘                     │   │
+│  │ - MQTT Out   │  │                                                    │   │
+│  │ - MQTT In    │  │                                                    │   │
+│  └──────────────┘  └────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Built with React Flow - native look & feel, deep device integration        │
+│  Flows compiled and deployed to Gateway Core runtime                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Final Architecture
 
@@ -439,9 +690,9 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 │            ▼                                                                │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │                          DEVICE LAYER                               │    │
-│  │    ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐    │    │
-│  │    │ PLC │  │ OPC │  │ S7  │  │Sensor│ │ HMI │  │ VFD │  │ ... │    │    │
-│  │    └─────┘  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘    │    │
+│  │    ┌─────┐  ┌─────┐  ┌─────┐  ┌───────┐  ┌─────┐  ┌─────┐  ┌─────┐  │    │
+│  │    │ PLC │  │ OPC │  │ S7  │  │Sensor │  │ HMI │  │ VFD │  │ ... │  │    │
+│  │    └─────┘  └─────┘  └─────┘  └───────┘  └─────┘  └─────┘  └─────┘  │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -480,13 +731,20 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 | **Runtime** | K3s / Kubernetes | Container orchestration |
 | **Protocol Gateway** | Go 1.22+ | High-performance device communication |
 | **Data Ingestion** | Go 1.22+ | Efficient database writes |
-| **Gateway Core** | Go or TypeScript | Management API |
-| **Web UI** | React / Vue | Administration interface |
-| **Message Broker** | EMQX 5.x | MQTT with clustering |
+| **Gateway Core API** | TypeScript, Fastify | Management REST API + WebSocket |
+| **Web UI Framework** | React 18, TypeScript, Vite | Single-page application |
+| **UI Styling** | TailwindCSS, Radix UI | Modern component library |
+| **Flow Editor** | React Flow | Visual flow designer canvas |
+| **Charts** | Recharts / Visx | Data visualization |
+| **State Management** | Zustand | Lightweight state |
+| **Data Fetching** | TanStack Query | Caching, real-time updates |
+| **Message Broker** | EMQX 5.8.x | MQTT with free clustering |
 | **Time-Series DB** | TimescaleDB 2.x | Historian storage |
 | **Config DB** | PostgreSQL 15+ | Device configuration |
 | **Observability** | Prometheus + Grafana | Metrics and dashboards |
 | **CI/CD** | GitHub Actions | Automated builds/deploys |
+
+> **Note on EMQX**: Using version 5.8.x (Apache 2.0 license) for free clustering. Version 5.9+ requires commercial license for clustering.
 
 ---
 

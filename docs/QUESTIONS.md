@@ -1766,11 +1766,12 @@ The architecture uses **one approach per device**, determined by configuration:
 │  │  • Consistent with Modbus and S7 behavior                             │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
-│  SubscriptionManager (AVAILABLE but NOT YET WIRED)                          │
+│  SubscriptionManager (AVAILABLE - Planned for Phase 3)                      │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  • subscription.go is implemented                                     │  │
-│  │  • Not yet integrated into main.go or PollingService                  │  │
-│  │  • Will be enabled via configuration flag                             │  │
+│  │  • subscription.go is fully implemented                               │  │
+│  │  • Config flag added: opc_use_subscriptions: true                     │  │
+│  │  • Full integration planned for Phase 3 (Gateway Core with UI)        │  │
+│  │  • Reason: Subscriptions need dynamic config, not static YAML         │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
 │  Decision Flow (Future):                                                    │
@@ -1913,8 +1914,8 @@ if cfg.OPCUA.EnableSubscriptions {
 │  └── ⚠️ Secret management (consider Kubernetes secrets)                     │
 │                                                                             │
 │  Deployment:                                                                │
-│  ├── ⚠️ Kubernetes manifests (not yet created)                              │
-│  ├── ⚠️ Helm charts (not yet created)                                       │
+│  ├── ✅ Kubernetes manifests (Kustomize-based, dev/prod overlays)           │
+│  ├── ⏸️ Helm charts (deferred - Kustomize sufficient)                       │
 │  └── ⚠️ CI/CD pipeline (not yet created)                                    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -2093,11 +2094,11 @@ spec:
 | **Observability** | ✅ **Production-Ready** | Metrics, health, logging |
 | **Configuration** | ✅ **Production-Ready** | YAML + env vars |
 | **Scaling** | ✅ **Production-Ready** | Horizontal scaling supported |
-| **Database Config** | ⚠️ **Needs Work** | Currently YAML only |
-| **Kubernetes Deploy** | ⚠️ **Needs Work** | Manifests not yet created |
+| **Database Config** | ⚠️ **Phase 3** | Currently YAML only, DB planned |
+| **Kubernetes Deploy** | ✅ **Production-Ready** | Kustomize manifests, HPA, PDB |
 | **Security Hardening** | ⚠️ **Needs Work** | TLS testing pending |
 
-**Overall Assessment**: The Protocol Gateway is **production-capable** for Phase 1 with the current YAML-based configuration. Database-driven configuration and Kubernetes manifests should be added for full enterprise deployment.
+**Overall Assessment**: The Protocol Gateway is **production-ready** for Phase 2 with Kubernetes deployment, horizontal scaling, and observability. Database-driven configuration is planned for Phase 3 (Gateway Core).
 
 ---
 
@@ -4458,7 +4459,7 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 | Phase | Status | Timeline |
 |-------|--------|----------|
 | **Phase 1: Foundation** | ✅ 100% Complete | Nov-Dec 2025 |
-| **Phase 2: Kubernetes & Scaling** | ✅ 85% Complete | Dec 2025 - Jan 2026 |
+| **Phase 2: Kubernetes & Scaling** | ✅ 95% Complete | Dec 2025 - Jan 2026 |
 | **Phase 3: Gateway Core & Management** | ⏳ Not Started | Q1-Q2 2026 |
 | **Phase 4: Analytics & Advanced Features** | 📋 Planned | Q2-Q3 2026 |
 | **Phase 5: Enterprise Features** | 📋 Planned | Q3-Q4 2026 |
@@ -4467,12 +4468,12 @@ func (w *Writer) WriteBatch(ctx context.Context, batch *domain.Batch) error {
 
 ```
 Phase 1: Foundation          ████████████████████ 100% ✅
-Phase 2: Kubernetes          ████████████████░░░░  85% ✅
+Phase 2: Kubernetes          ███████████████████░  95% ✅
 Phase 3: Gateway Core        ░░░░░░░░░░░░░░░░░░░░   0% ⏳
 Phase 4: Analytics           ░░░░░░░░░░░░░░░░░░░░   0% 📋
 Phase 5: Enterprise          ░░░░░░░░░░░░░░░░░░░░   0% 📋
 ─────────────────────────────────────────────────────────
-Total Progress               ████████░░░░░░░░░░░░  37%
+Total Progress               █████████░░░░░░░░░░░  39%
 ```
 
 ### What's Next (Phase 3)
