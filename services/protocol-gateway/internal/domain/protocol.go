@@ -84,14 +84,15 @@ func (pm *ProtocolManager) WriteTag(ctx context.Context, device *Device, tag *Ta
 
 // Close closes all protocol pools. Thread-safe.
 func (pm *ProtocolManager) Close() error {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-	
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
 	var lastErr error
-	for _, pool := range pm.pools {
+	for protocol, pool := range pm.pools {
 		if err := pool.Close(); err != nil {
 			lastErr = err
 		}
+		delete(pm.pools, protocol)
 	}
 	return lastErr
 }
@@ -100,7 +101,7 @@ func (pm *ProtocolManager) Close() error {
 func (pm *ProtocolManager) HealthCheck(ctx context.Context) error {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	for _, pool := range pm.pools {
 		if err := pool.HealthCheck(ctx); err != nil {
 			return err
@@ -113,11 +114,10 @@ func (pm *ProtocolManager) HealthCheck(ctx context.Context) error {
 func (pm *ProtocolManager) RegisteredProtocols() []Protocol {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-	
+
 	protocols := make([]Protocol, 0, len(pm.pools))
 	for p := range pm.pools {
 		protocols = append(protocols, p)
 	}
 	return protocols
 }
-

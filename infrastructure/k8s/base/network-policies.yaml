@@ -1,0 +1,262 @@
+# Network Policies for NEXUS Edge
+# Implements least-privilege network access between services
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: nexus
+  labels:
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Protocol Gateway Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: protocol-gateway
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: protocol-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow health checks and metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 8081
+          protocol: TCP
+    # Allow internal HTTP access
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Allow MQTT to EMQX
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: emqx
+      ports:
+        - port: 1883
+          protocol: TCP
+        - port: 8883
+          protocol: TCP
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow outbound to industrial devices (all ports - devices have various ports)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+
+---
+# Data Ingestion Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: data-ingestion
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: data-ingestion
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow health checks and metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 8081
+          protocol: TCP
+    # Allow internal HTTP access
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # Allow MQTT to EMQX
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: emqx
+      ports:
+        - port: 1883
+          protocol: TCP
+    # Allow PostgreSQL to TimescaleDB
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: timescaledb
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# EMQX Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: emqx
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow MQTT from protocol-gateway
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: protocol-gateway
+      ports:
+        - port: 1883
+          protocol: TCP
+        - port: 8883
+          protocol: TCP
+    # Allow MQTT from data-ingestion
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: data-ingestion
+      ports:
+        - port: 1883
+          protocol: TCP
+    # Allow dashboard access from within cluster
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 18083
+          protocol: TCP
+    # Allow EMQX cluster communication
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: emqx
+      ports:
+        - port: 4370
+          protocol: TCP
+        - port: 5370
+          protocol: TCP
+  egress:
+    # Allow EMQX cluster communication
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: emqx
+      ports:
+        - port: 4370
+          protocol: TCP
+        - port: 5370
+          protocol: TCP
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# TimescaleDB Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: timescaledb
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow PostgreSQL from data-ingestion only
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: data-ingestion
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 9187
+          protocol: TCP
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+

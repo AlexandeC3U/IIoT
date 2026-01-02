@@ -1,0 +1,68 @@
+# Resource Controls for NEXUS Edge Namespace
+# These prevent resource exhaustion and enforce best practices
+---
+# Resource Quota - limits total resources in namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: nexus-quota
+  namespace: nexus
+  labels:
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  hard:
+    # Compute limits
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    
+    # Object counts
+    pods: "50"
+    services: "20"
+    secrets: "30"
+    configmaps: "30"
+    persistentvolumeclaims: "20"
+    
+    # Storage
+    requests.storage: 500Gi
+
+---
+# Limit Range - enforces default limits on containers
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: nexus-limits
+  namespace: nexus
+  labels:
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  limits:
+    # Default limits for containers
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+    
+    # Default limits for pods
+    - type: Pod
+      max:
+        cpu: "8"
+        memory: "16Gi"
+    
+    # PVC size limits
+    - type: PersistentVolumeClaim
+      min:
+        storage: "1Gi"
+      max:
+        storage: "200Gi"
+

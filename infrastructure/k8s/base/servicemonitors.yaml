@@ -1,0 +1,146 @@
+# ServiceMonitors for Prometheus Operator
+# These enable automatic service discovery and metrics scraping
+# Requires: Prometheus Operator to be installed in the cluster
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: protocol-gateway
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: protocol-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: nexus-edge
+    release: prometheus  # Match Prometheus Operator selector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: protocol-gateway
+  namespaceSelector:
+    matchNames:
+      - nexus
+  endpoints:
+    - port: health
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        # Add service label to all metrics
+        - sourceLabels: []
+          targetLabel: service
+          replacement: protocol-gateway
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: data-ingestion
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/component: ingestion
+    app.kubernetes.io/part-of: nexus-edge
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-ingestion
+  namespaceSelector:
+    matchNames:
+      - nexus
+  endpoints:
+    - port: health
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        - sourceLabels: []
+          targetLabel: service
+          replacement: data-ingestion
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: emqx
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: nexus-edge
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+  namespaceSelector:
+    matchNames:
+      - nexus
+  endpoints:
+    - port: dashboard
+      path: /api/v5/prometheus/stats
+      interval: 30s
+      scrapeTimeout: 15s
+      scheme: http
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        - sourceLabels: []
+          targetLabel: service
+          replacement: emqx
+
+---
+# TimescaleDB requires postgres_exporter sidecar for metrics
+# This ServiceMonitor assumes you've added the exporter sidecar
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: timescaledb
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nexus-edge
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: timescaledb
+  namespaceSelector:
+    matchNames:
+      - nexus
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 15s
+      scheme: http
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        - sourceLabels: []
+          targetLabel: service
+          replacement: timescaledb
+

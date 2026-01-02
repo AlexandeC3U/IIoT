@@ -920,17 +920,17 @@ func (c *Client) reconnect(ctx context.Context) {
 	}
 }
 
-// GetStats returns the client statistics.
-func (c *Client) GetStats() ClientStats {
-	return ClientStats{
-		ReadCount:         atomic.Uint64{},
-		WriteCount:        atomic.Uint64{},
-		ErrorCount:        atomic.Uint64{},
-		RetryCount:        atomic.Uint64{},
-		SubscribeCount:    atomic.Uint64{},
-		NotificationCount: atomic.Uint64{},
-		TotalReadTime:     atomic.Int64{},
-		TotalWriteTime:    atomic.Int64{},
+// GetStats returns the client statistics as a map.
+func (c *Client) GetStats() map[string]uint64 {
+	return map[string]uint64{
+		"read_count":         c.stats.ReadCount.Load(),
+		"write_count":        c.stats.WriteCount.Load(),
+		"error_count":        c.stats.ErrorCount.Load(),
+		"retry_count":        c.stats.RetryCount.Load(),
+		"subscribe_count":    c.stats.SubscribeCount.Load(),
+		"notification_count": c.stats.NotificationCount.Load(),
+		"total_read_ns":      uint64(c.stats.TotalReadTime.Load()),
+		"total_write_ns":     uint64(c.stats.TotalWriteTime.Load()),
 	}
 }
 

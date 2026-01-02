@@ -39,6 +39,19 @@ spec:
               mountPath: /var/lib/postgresql/data
           securityContext:
             runAsUser: 0
+        
+        # Make init scripts executable
+        - name: init-scripts-permissions
+          image: busybox:1.36
+          command: ['sh', '-c', 'cp /scripts-ro/* /scripts/ && chmod +x /scripts/*.sh']
+          volumeMounts:
+            - name: init-scripts-ro
+              mountPath: /scripts-ro
+              readOnly: true
+            - name: init-scripts
+              mountPath: /scripts
+          securityContext:
+            runAsUser: 0
       
       containers:
         - name: timescaledb
@@ -51,6 +64,7 @@ spec:
               protocol: TCP
           
           env:
+            # PostgreSQL admin credentials
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
@@ -66,6 +80,17 @@ spec:
                 secretKeyRef:
                   name: timescaledb-secrets
                   key: POSTGRES_DB
+            # Application role passwords (for init scripts)
+            - name: NEXUS_HISTORIAN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secrets
+                  key: NEXUS_HISTORIAN_PASSWORD
+            - name: NEXUS_INGESTION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secrets
+                  key: NEXUS_INGESTION_PASSWORD
             # Performance tuning
             - name: TIMESCALEDB_TELEMETRY
               value: "off"
@@ -116,7 +141,6 @@ spec:
               mountPath: /var/lib/postgresql/data
             - name: init-scripts
               mountPath: /docker-entrypoint-initdb.d
-              readOnly: true
           
           livenessProbe:
             exec:
@@ -143,11 +167,68 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+        
+        # PostgreSQL Exporter sidecar for Prometheus metrics
+        - name: postgres-exporter
+          image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+          imagePullPolicy: IfNotPresent
+          
+          ports:
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          
+          env:
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: timescaledb-secrets
+                  key: EXPORTER_DSN
+            # Disable default metrics that require superuser
+            - name: PG_EXPORTER_DISABLE_DEFAULT_METRICS
+              value: "false"
+            - name: PG_EXPORTER_DISABLE_SETTINGS_METRICS
+              value: "false"
+          
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop:
+                - ALL
       
       volumes:
-        - name: init-scripts
+        # Read-only configmap with init scripts
+        - name: init-scripts-ro
           configMap:
             name: timescaledb-init
+        # Writable volume for executable init scripts
+        - name: init-scripts
+          emptyDir: {}
       
       terminationGracePeriodSeconds: 60
   

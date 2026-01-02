@@ -1,6 +1,6 @@
 module github.com/nexus-edge/data-ingestion
 
-go 1.21
+go 1.22
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.4.3

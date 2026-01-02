@@ -9,6 +9,11 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - secrets.yaml
+  - network-policies.yaml
+  - resource-controls.yaml
+  # ServiceMonitors require Prometheus Operator CRDs
+  # Uncomment after installing Prometheus Operator:
+  # - servicemonitors.yaml
 
 commonLabels:
   app.kubernetes.io/managed-by: kustomize

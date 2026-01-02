@@ -511,18 +511,8 @@ func (h *CommandHandler) RemoveDevice(deviceID string) {
 	h.logger.Debug().Str("device_id", deviceID).Msg("Removed device")
 }
 
-// Stats returns command handling statistics.
-func (h *CommandHandler) Stats() CommandStats {
-	return CommandStats{
-		CommandsReceived:  atomic.Uint64{},
-		CommandsSucceeded: atomic.Uint64{},
-		CommandsFailed:    atomic.Uint64{},
-		CommandsRejected:  atomic.Uint64{},
-	}
-}
-
-// GetStats returns the actual stats values.
-func (h *CommandHandler) GetStats() map[string]uint64 {
+// Stats returns a snapshot of command handling statistics.
+func (h *CommandHandler) Stats() map[string]uint64 {
 	return map[string]uint64{
 		"commands_received":  h.stats.CommandsReceived.Load(),
 		"commands_succeeded": h.stats.CommandsSucceeded.Load(),
