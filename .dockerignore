@@ -1,0 +1,126 @@
+# ============================================
+# NEXUS Edge Platform - Root .dockerignore
+# ============================================
+# Excludes files from Docker build context (root-level builds)
+
+# ===========================================
+# Git
+# ===========================================
+.git
+.gitignore
+.gitattributes
+.github
+
+# ===========================================
+# IDE / Editors
+# ===========================================
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.project
+
+# ===========================================
+# Documentation
+# ===========================================
+*.md
+!README.md
+docs/
+GRAPH.md
+ROADMAP.md
+
+# ===========================================
+# Node.js
+# ===========================================
+node_modules
+.pnpm-store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+frontend/node_modules
+
+# ===========================================
+# Test files
+# ===========================================
+*_test.go
+**/*_test.go
+coverage.out
+coverage.html
+coverage.xml
+*.prof
+test/
+tests/
+testing/
+__tests__
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+
+# ===========================================
+# Development configs
+# ===========================================
+docker-compose*.yaml
+docker-compose*.yml
+Makefile
+.env*
+.editorconfig
+.eslintrc*
+.prettierrc*
+.golangci.yml
+go.work
+go.work.sum
+
+# ===========================================
+# Build artifacts (already built in stage)
+# ===========================================
+bin/
+dist/
+build/
+out/
+.next/
+
+# ===========================================
+# Kubernetes
+# ===========================================
+infrastructure/k8s/
+
+# ===========================================
+# OS files
+# ===========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================================
+# Temporary / Logs
+# ===========================================
+tmp/
+temp/
+*.tmp
+*.log
+logs/
+
+# ===========================================
+# Secrets (should never be in image)
+# ===========================================
+*.pem
+*.key
+*.crt
+secrets/
+
+# ===========================================
+# Database files
+# ===========================================
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# ===========================================
+# Scripts not needed in containers
+# ===========================================
+scripts/git/
+

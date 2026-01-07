@@ -1,0 +1,20 @@
+// NEXUS Edge Platform - Go Workspace
+// This file enables multi-module development with shared dependencies
+//
+// Benefits:
+// - Single `go build ./...` from root builds all services
+// - IDE support across all modules (jump to definition, autocomplete)
+// - Shared dependency resolution
+// - Faster local development iterations
+//
+// Usage:
+//   go work sync    # Sync dependencies across modules
+//   go build ./...  # Build all services from root
+//   go test ./...   # Test all services from root
+
+go 1.22.0
+
+use (
+	./services/data-ingestion
+	./services/protocol-gateway
+)

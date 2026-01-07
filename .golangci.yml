@@ -1,0 +1,199 @@
+# ============================================
+# NEXUS Edge Platform - golangci-lint Configuration
+# ============================================
+# Run: golangci-lint run ./...
+# Install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+run:
+  # Timeout for analysis
+  timeout: 5m
+  
+  # Include test files
+  tests: true
+  
+  # Skip vendor, generated files
+  skip-dirs:
+    - vendor
+    - generated
+    - mocks
+  
+  # Modules download mode
+  modules-download-mode: readonly
+
+# Linter settings
+linters-settings:
+  errcheck:
+    # Report about not checking errors in type assertions
+    check-type-assertions: true
+    # Report about assignment of errors to blank identifier
+    check-blank: true
+    
+  govet:
+    # Report shadowed variables
+    check-shadowing: true
+    
+  gofmt:
+    # Simplify code
+    simplify: true
+    
+  goimports:
+    # Put local imports after 3rd-party packages
+    local-prefixes: github.com/nexus-edge
+    
+  goconst:
+    # Minimal length of string constant
+    min-len: 3
+    # Minimal occurrences count to trigger
+    min-occurrences: 3
+    
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - hugeParam  # Allow large structs by value (common in config)
+      - rangeValCopy  # Too noisy for simple loops
+      
+  gosec:
+    # Exclude generated code
+    excludes:
+      - G104  # Audit errors not checked (handled by errcheck)
+    config:
+      G306: "0644"  # Expected file permissions
+      
+  misspell:
+    locale: US
+    
+  nakedret:
+    # Max function length for naked returns
+    max-func-lines: 30
+    
+  prealloc:
+    # Only report simple loops
+    simple: true
+    range-loops: true
+    for-loops: false
+    
+  revive:
+    # Confidence threshold
+    confidence: 0.8
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: dot-imports
+      - name: error-return
+      - name: error-strings
+      - name: error-naming
+      - name: exported
+      - name: increment-decrement
+      - name: var-naming
+      - name: var-declaration
+      - name: package-comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: indent-error-flow
+      - name: errorf
+      
+  staticcheck:
+    # SAxxxx checks
+    checks: ["all"]
+    
+  unused:
+    # Check for unused parameters
+    check-exported: false
+
+# Enabled linters
+linters:
+  disable-all: true
+  enable:
+    # Default linters
+    - errcheck        # Check for unchecked errors
+    - gosimple        # Simplify code
+    - govet           # Examine Go source code
+    - ineffassign     # Detect ineffective assignments
+    - staticcheck     # Static analysis
+    - unused          # Check for unused code
+    
+    # Additional recommended linters
+    - bodyclose       # HTTP response body close
+    - contextcheck    # Context handling
+    - durationcheck   # Duration multiplications
+    - errname         # Error naming conventions
+    - errorlint       # Error wrapping
+    - exhaustive      # Enum switch exhaustiveness
+    - exportloopref   # Loop variable capture
+    - gofmt           # Code formatting
+    - goimports       # Import formatting
+    - goconst         # Repeated strings as constants
+    - gocritic        # Various code patterns
+    - gosec           # Security issues
+    - misspell        # Spelling mistakes
+    - nakedret        # Naked returns in functions
+    - nilerr          # nil error checks
+    - noctx           # HTTP requests without context
+    - prealloc        # Slice preallocation
+    - predeclared     # Predeclared identifier shadowing
+    - revive          # Fast, configurable linter
+    - rowserrcheck    # sql.Rows.Err() check
+    - sqlclosecheck   # sql.Rows.Close() check
+    - unconvert       # Unnecessary type conversions
+    - unparam         # Unused function parameters
+    - wastedassign    # Wasted assignments
+
+# Issue settings
+issues:
+  # Maximum issues count per linter
+  max-issues-per-linter: 50
+  
+  # Maximum same issues count
+  max-same-issues: 10
+  
+  # Show all issues from a linter
+  new: false
+  
+  # Exclude some issues
+  exclude-rules:
+    # Ignore some linters in tests
+    - path: _test\.go
+      linters:
+        - goconst
+        - gosec
+        - errcheck
+        - dupl
+        
+    # Ignore long lines in generated code
+    - path: generated
+      linters:
+        - lll
+        
+    # Allow globals in main.go
+    - path: main\.go
+      linters:
+        - gochecknoglobals
+        
+    # Ignore magic numbers in tests
+    - path: _test\.go
+      linters:
+        - gomnd
+
+# Output configuration
+output:
+  # Format: colored-line-number|line-number|json|tab|checkstyle|code-climate
+  format: colored-line-number
+  
+  # Print lines of code with issue
+  print-issued-lines: true
+  
+  # Print linter name in the end of issue text
+  print-linter-name: true
+  
+  # Make issues output unique by line
+  uniq-by-line: true
+  
+  # Sort results by: filepath, line and column
+  sort-results: true
+

@@ -1,0 +1,118 @@
+# ============================================
+# NEXUS Edge Platform - EditorConfig
+# ============================================
+# https://editorconfig.org
+# Ensures consistent coding styles across editors and IDEs
+
+# Top-most EditorConfig file
+root = true
+
+# ============================================
+# Default settings for all files
+# ============================================
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# ============================================
+# Go files
+# ============================================
+[*.go]
+indent_style = tab
+indent_size = 4
+
+# ============================================
+# Makefiles (require tabs)
+# ============================================
+[Makefile]
+indent_style = tab
+indent_size = 4
+
+[*.mk]
+indent_style = tab
+indent_size = 4
+
+# ============================================
+# Python (if used for scripts)
+# ============================================
+[*.py]
+indent_size = 4
+
+# ============================================
+# YAML files (Kubernetes, Docker Compose, etc.)
+# ============================================
+[*.{yaml,yml}]
+indent_size = 2
+
+# ============================================
+# JSON files
+# ============================================
+[*.json]
+indent_size = 2
+
+# ============================================
+# JavaScript/TypeScript
+# ============================================
+[*.{js,jsx,ts,tsx}]
+indent_size = 2
+
+# ============================================
+# HTML/CSS
+# ============================================
+[*.{html,css,scss,sass,less}]
+indent_size = 2
+
+# ============================================
+# Markdown
+# ============================================
+[*.md]
+trim_trailing_whitespace = false
+indent_size = 2
+
+# ============================================
+# Shell scripts
+# ============================================
+[*.{sh,bash,zsh}]
+indent_size = 2
+
+# PowerShell
+[*.{ps1,psm1,psd1}]
+indent_size = 4
+
+# ============================================
+# SQL files
+# ============================================
+[*.sql]
+indent_size = 2
+
+# ============================================
+# Docker files
+# ============================================
+[Dockerfile*]
+indent_size = 4
+
+[.dockerignore]
+indent_size = 2
+
+# ============================================
+# Protocol Buffers
+# ============================================
+[*.proto]
+indent_size = 2
+
+# ============================================
+# Config files
+# ============================================
+[*.{toml,ini,cfg}]
+indent_size = 2
+
+# ============================================
+# Git files
+# ============================================
+[.git*]
+indent_size = 4
+

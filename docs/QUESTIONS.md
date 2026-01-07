@@ -12,6 +12,7 @@ This document captures key architectural decisions for the NEXUS Edge platform b
 4. [Authentication & Authorization](#4️⃣-authentication--authorization)
 5. [Data Governance](#5️⃣-data-governance)
 6. [Composable Architecture](#6️⃣-composable-architecture)
+   - [Component Swappability: The Power of UNS](#component-swappability-the-power-of-uns)
 7. [Protocol Gateway: Why Custom Go](#7️⃣-protocol-gateway-why-custom-go-instead-of-emqx-neuron)
 8. [Protocol Gateway: Code Architecture](#8️⃣-protocol-gateway-code-architecture)
 9. [Scaling: 1000+ or 10000+ Devices](#9️⃣-scaling-1000-or-10000-devices)
@@ -557,6 +558,272 @@ The composable architecture enables creating "packaged" vertical solutions:
                     │   (Composable Platform)│
                     └────────────────────────┘
 ```
+
+### Component Swappability: The Power of UNS
+
+**Question:** How composable is the architecture? Can I swap out EMQX for HiveMQ, or add HiveMQ Edge as an alternative protocol gateway without changing code?
+
+**Answer:** **Extremely composable.** Thanks to the Unified Namespace (UNS) pattern, components communicate via standardized MQTT topics, not direct service calls. This means:
+
+- ✅ **Swap MQTT brokers** (EMQX ↔ HiveMQ ↔ Mosquitto) with zero code changes
+- ✅ **Add alternative protocol gateways** (HiveMQ Edge, EMQX Neuron) alongside or instead of our custom Go gateway
+- ✅ **Mix and match** components from different vendors
+- ✅ **Gradually migrate** from one stack to another
+
+#### Why This Works: UNS as the Universal Contract
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    UNIFIED NAMESPACE = UNIVERSAL API                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  The UNS topic structure is the CONTRACT between components:                │
+│                                                                             │
+│  Topic: {enterprise}/{site}/{area}/{line}/{device}/{tag}                    │
+│                                                                             │
+│  ANY producer that publishes to this structure works with ANY consumer      │
+│  that subscribes to it. The broker is just a pipe.                          │
+│                                                                             │
+│  ┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐   │
+│  │  NEXUS Protocol  │      │                  │      │  Data Ingestion  │   │
+│  │    Gateway       │─────>│   MQTT Broker    │<─────│  Service         │   │
+│  │     (Go)         │      │  (ANY vendor)    │      │                  │   │
+│  └──────────────────┘      └──────────────────┘      └──────────────────┘   │
+│           │                         ▲                         │             │
+│           │                         │                         │             │
+│           │                ┌────────┴────────┐                │             │
+│           │                │   OR            │                │             │
+│           │                ▼                 ▼                │             │
+│  ┌──────────────────┐      ┌──────────────────┐               │             │
+│  │  HiveMQ Edge     │─────>│  HiveMQ Broker   │<──────────────┘             │
+│  │  Protocol GW     │      │                  │                             │
+│  └──────────────────┘      └──────────────────┘                             │
+│                                                                             │
+│  BOTH scenarios work because they speak the same "language" (UNS topics)    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Example 1: Swap EMQX for HiveMQ (Zero Code Changes)
+
+```yaml
+# docker-compose.hivemq.yml - Drop-in replacement
+version: '3.8'
+
+services:
+  # REPLACE EMQX with HiveMQ
+  mqtt-broker:
+    image: hivemq/hivemq4:latest
+    container_name: nexus-hivemq
+    ports:
+      - "1883:1883"      # MQTT TCP (same port!)
+      - "8883:8883"      # MQTT TLS
+      - "8080:8080"      # HiveMQ Control Center
+    volumes:
+      - hivemq-data:/opt/hivemq/data
+    environment:
+      - HIVEMQ_ALLOW_ALL_CLIENTS=true  # For dev; use auth in prod
+    networks:
+      - nexus-internal
+
+  # Protocol Gateway - NO CHANGES NEEDED
+  protocol-gateway:
+    image: nexus/protocol-gateway:latest
+    environment:
+      # Just point to the new broker hostname
+      - NEXUS_MQTT_BROKER=tcp://mqtt-broker:1883
+      # Everything else stays the same!
+    depends_on:
+      - mqtt-broker
+
+  # Data Ingestion - NO CHANGES NEEDED  
+  data-ingestion:
+    image: nexus/data-ingestion:latest
+    environment:
+      - INGESTION_MQTT_BROKER_URL=tcp://mqtt-broker:1883
+    depends_on:
+      - mqtt-broker
+
+volumes:
+  hivemq-data:
+
+networks:
+  nexus-internal:
+```
+
+**What changed?** Only the broker image and its specific config. Zero application code changes!
+
+#### Example 2: Add HiveMQ Edge Alongside NEXUS Protocol Gateway
+
+HiveMQ Edge is a protocol converter that can complement or replace parts of our custom gateway:
+
+```yaml
+# docker-compose.hybrid.yml - Mix both protocol gateways
+version: '3.8'
+
+services:
+  # Keep EMQX as the central broker
+  emqx:
+    image: emqx/emqx:5.3.2
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+
+  # NEXUS Protocol Gateway handles S7 and OPC UA
+  nexus-protocol-gateway:
+    image: nexus/protocol-gateway:latest
+    environment:
+      - NEXUS_MQTT_BROKER=tcp://emqx:1883
+      - NEXUS_S7_ENABLED=true
+      - NEXUS_OPCUA_ENABLED=true
+      - NEXUS_MODBUS_ENABLED=false  # Let HiveMQ Edge handle Modbus
+    networks:
+      - nexus-internal
+      - nexus-ot
+
+  # HiveMQ Edge handles Modbus devices in a different zone
+  hivemq-edge:
+    image: hivemq/hivemq-edge:latest
+    ports:
+      - "8080:8080"  # HiveMQ Edge UI
+    environment:
+      # Bridge to central EMQX broker
+      - HIVEMQ_BRIDGE_HOST=emqx
+      - HIVEMQ_BRIDGE_PORT=1883
+    volumes:
+      - ./config/hivemq-edge/config.xml:/opt/hivemq-edge/conf/config.xml
+    networks:
+      - nexus-internal
+      - nexus-modbus-zone  # Separate OT zone
+
+  # Data Ingestion doesn't care WHERE the data comes from!
+  data-ingestion:
+    image: nexus/data-ingestion:latest
+    environment:
+      - INGESTION_MQTT_BROKER_URL=tcp://emqx:1883
+      # Subscribes to acme/# - gets data from BOTH gateways
+```
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                    HYBRID PROTOCOL GATEWAY ARCHITECTURE                        │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  OT Zone A (Siemens PLCs)           OT Zone B (Modbus Devices)                 │
+│  ┌─────────────────────┐            ┌─────────────────────┐                    │
+│  │  S7-1500  S7-1200   │            │  Power Meter  VFD   │                    │
+│  │    │        │       │            │      │         │    │                    │
+│  └────┼────────┼───────┘            └──────┼─────────┼────┘                    │
+│       │        │                           │         │                         │
+│       ▼        ▼                           ▼         ▼                         │
+│  ┌─────────────────────┐            ┌─────────────────────┐                    │
+│  │  NEXUS Protocol GW  │            │    HiveMQ Edge      │                    │
+│  │  (Go - S7/OPC UA)   │            │   (Modbus driver)   │                    │
+│  └──────────┬──────────┘            └──────────┬──────────┘                    │
+│             │                                  │                               │
+│             │  Publish to UNS                  │  Publish to UNS               │
+│             │  acme/plant/area/line/plc/*      │  acme/plant/area/line/meter/* │
+│             │                                  │                               │
+│             └──────────────┬───────────────────┘                               │
+│                            ▼                                                   │
+│                   ┌─────────────────┐                                          │
+│                   │   EMQX Broker   │                                          │
+│                   │  (Central Hub)  │                                          │
+│                   └────────┬────────┘                                          │
+│                            │                                                   │
+│              Subscribe: acme/#                                                 │
+│                            │                                                   │
+│                            ▼                                                   │
+│                   ┌─────────────────┐                                          │
+│                   │ Data Ingestion  │  ← Doesn't know/care about source!       │
+│                   │   (All data)    │                                          │
+│                   └─────────────────┘                                          │
+│                                                                                │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Example 3: Full HiveMQ Stack Replacement
+
+Want to go all-in on HiveMQ? No problem:
+
+```yaml
+# docker-compose.hivemq-full.yml
+version: '3.8'
+
+services:
+  # HiveMQ as the central broker
+  hivemq:
+    image: hivemq/hivemq4:latest
+    ports:
+      - "1883:1883"
+      - "8080:8080"
+
+  # HiveMQ Edge as the ONLY protocol gateway
+  hivemq-edge:
+    image: hivemq/hivemq-edge:latest
+    environment:
+      - HIVEMQ_EDGE_MQTT_HOST=hivemq
+    # Configure adapters for S7, OPC UA, Modbus in config.xml
+    volumes:
+      - ./config/hivemq-edge/adapters.xml:/opt/hivemq-edge/conf/adapters.xml
+
+  # NEXUS Data Ingestion - STILL WORKS!
+  data-ingestion:
+    image: nexus/data-ingestion:latest
+    environment:
+      - INGESTION_MQTT_BROKER_URL=tcp://hivemq:1883
+    # No code changes! Subscribes to UNS topics as always
+
+  # NEXUS Frontend - STILL WORKS!
+  frontend:
+    image: nexus/frontend:latest
+    # WebSocket to HiveMQ instead of EMQX
+    environment:
+      - VITE_WS_URL=ws://hivemq:8000
+```
+
+#### What Makes This Possible?
+
+| Design Decision | How It Enables Composability |
+|-----------------|------------------------------|
+| **UNS Topic Contract** | All components agree on `{enterprise}/{site}/{area}/{line}/{device}/{tag}` |
+| **Standard MQTT Protocol** | Any broker speaks MQTT 3.1.1/5.0 |
+| **JSON Payload Format** | `{"value": X, "timestamp": T, "quality": Q}` is universal |
+| **Environment-Based Config** | Broker URLs are config, not code |
+| **No Direct Service Calls** | Services don't call each other; they publish/subscribe |
+| **Stateless Services** | Protocol Gateway and Ingestion don't store state |
+
+#### Gradual Migration Example
+
+Migrating from EMQX to HiveMQ without downtime:
+
+```
+Week 1: Add HiveMQ as secondary broker with MQTT bridge
+        ┌─────────┐  bridge  ┌─────────┐
+        │  EMQX   │ <──────> │ HiveMQ  │
+        └─────────┘          └─────────┘
+        
+Week 2: Point some Protocol Gateway instances to HiveMQ
+        Test data flow end-to-end
+
+Week 3: Move Data Ingestion to HiveMQ
+        Verify database writes
+
+Week 4: Decommission EMQX, HiveMQ is now primary
+```
+
+#### Limitations (What's NOT Plug-and-Play)
+
+| Component | Swappable? | Notes |
+|-----------|------------|-------|
+| MQTT Broker | ✅ Yes | EMQX, HiveMQ, Mosquitto, etc. |
+| Protocol Gateway | ✅ Yes | NEXUS Go, HiveMQ Edge, Neuron, etc. |
+| TimescaleDB | ⚠️ Mostly | Could use InfluxDB, but schema changes needed |
+| PostgreSQL | ⚠️ Mostly | Standard SQL, but migrations may differ |
+| Frontend | ❌ Tied | React frontend is NEXUS-specific |
+| Gateway Core API | ❌ Tied | Custom REST API |
+
+**Summary:** The "data plane" (devices → broker → historian) is highly composable. The "control plane" (API, frontend) is NEXUS-specific.
 
 ---
 

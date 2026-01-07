@@ -1,6 +1,6 @@
 module github.com/nexus-edge/protocol-gateway
 
-go 1.22
+go 1.22.0
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.4.3

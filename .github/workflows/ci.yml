@@ -1,0 +1,214 @@
+# ============================================
+# NEXUS Edge Platform - CI Pipeline
+# ============================================
+# Runs on every push and PR to validate code quality
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.22'
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+
+jobs:
+  # ============================================
+  # Go Services - Lint, Test, Build
+  # ============================================
+  go-services:
+    name: Go Services
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: |
+            services/*/go.sum
+            
+      - name: Download dependencies
+        run: |
+          cd services/protocol-gateway && go mod download
+          cd ../data-ingestion && go mod download
+          
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          working-directory: .
+          args: --timeout=5m ./services/...
+          
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./services/...
+        
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          flags: go-services
+          fail_ci_if_error: false
+          
+      - name: Build services
+        run: |
+          cd services/protocol-gateway && go build -ldflags="-w -s" -o bin/protocol-gateway ./cmd/gateway
+          cd ../data-ingestion && go build -ldflags="-w -s" -o bin/data-ingestion ./cmd/ingestion
+          
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-binaries
+          path: |
+            services/*/bin/*
+          retention-days: 1
+
+  # ============================================
+  # Security Scan
+  # ============================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: go-services
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: services/*/go.sum
+          
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: -exclude-generated ./services/...
+          
+      - name: Run Govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./services/...
+
+  # ============================================
+  # Docker Build
+  # ============================================
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: go-services
+    
+    strategy:
+      matrix:
+        service:
+          - name: protocol-gateway
+            path: services/protocol-gateway
+          - name: data-ingestion
+            path: services/data-ingestion
+            
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.path }}
+          push: false
+          tags: nexus/${{ matrix.service.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: nexus/${{ matrix.service.name }}:${{ github.sha }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ============================================
+  # Kubernetes Manifests Validation
+  # ============================================
+  kubernetes:
+    name: Kubernetes Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Kubectl
+        uses: azure/setup-kubectl@v4
+        
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+        
+      - name: Validate base manifests
+        run: |
+          kustomize build infrastructure/k8s/base > /dev/null
+          echo "✓ Base manifests valid"
+          
+      - name: Validate dev overlay
+        run: |
+          kustomize build infrastructure/k8s/overlays/dev > /dev/null
+          echo "✓ Dev overlay valid"
+          
+      - name: Validate prod overlay
+        run: |
+          kustomize build infrastructure/k8s/overlays/prod > /dev/null
+          echo "✓ Prod overlay valid"
+          
+      - name: Dry-run validation
+        run: |
+          kustomize build infrastructure/k8s/overlays/dev | kubectl apply --dry-run=client -f -
+
+  # ============================================
+  # All Checks Passed
+  # ============================================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [go-services, security, docker, kubernetes]
+    if: always()
+    
+    steps:
+      - name: Check all jobs
+        run: |
+          if [[ "${{ needs.go-services.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]] || \
+             [[ "${{ needs.docker.result }}" != "success" ]] || \
+             [[ "${{ needs.kubernetes.result }}" != "success" ]]; then
+            echo "❌ One or more jobs failed"
+            exit 1
+          fi
+          echo "✅ All CI checks passed!"
+
