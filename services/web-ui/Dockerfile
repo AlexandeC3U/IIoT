@@ -13,14 +13,11 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@8.12.0 --activate
 
-# Copy package files
-COPY package.json pnpm-lock.yaml* ./
+# Copy source code (including package.json)
+COPY . .
 
 # Install dependencies
-RUN pnpm install --frozen-lockfile
-
-# Copy source code
-COPY . .
+RUN pnpm install --no-frozen-lockfile
 
 # Build arguments for API URLs
 ARG VITE_API_URL=/api

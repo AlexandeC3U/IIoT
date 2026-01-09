@@ -13,20 +13,17 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@8.12.0 --activate
 
-# Copy package files
-COPY package.json pnpm-lock.yaml* ./
-
-# Install dependencies
-RUN pnpm install --frozen-lockfile
-
-# Copy source code
+# Copy source code (including package.json)
 COPY . .
+
+# Install ALL dependencies (including devDependencies for build)
+RUN pnpm install --no-frozen-lockfile
 
 # Build TypeScript
 RUN pnpm build
 
-# Prune dev dependencies
-RUN pnpm prune --prod
+# Remove devDependencies, keep only production deps
+RUN pnpm install --prod --no-frozen-lockfile
 
 # -----------------------------------------------------------------------------
 # Stage 2: Production
