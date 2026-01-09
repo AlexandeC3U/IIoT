@@ -3,8 +3,6 @@
 # Docker Compose Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
 
-version: '3.8'
-
 networks:
   nexus-internal:
     driver: bridge
@@ -88,7 +86,7 @@ services:
       - "5432:5432"
     volumes:
       - timescale-data:/var/lib/postgresql/data
-      - ./config/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ../../config/timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - nexus-internal
     healthcheck:
@@ -128,11 +126,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ../../config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - nexus-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus_config}"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -142,36 +140,37 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Gateway Core
-  # Central API Gateway with authentication and routing
+  # Gateway Core (TypeScript/Fastify)
+  # Device & Tag management API, MQTT config notifications
   # ─────────────────────────────────────────────────────────────────────────────
   gateway-core:
     build:
       context: ../../services/gateway-core
       dockerfile: Dockerfile
     image: nexus/gateway-core:${VERSION:-latest}
-    container_name: nexus-gateway
-    hostname: gateway
+    container_name: nexus-gateway-core
+    hostname: gateway-core
     restart: unless-stopped
     environment:
       - NODE_ENV=${NODE_ENV:-production}
-      - PORT=3000
-      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
-      - JWT_EXPIRY=24h
-      # Database connections
+      - PORT=3001
+      - HOST=0.0.0.0
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      # PostgreSQL config database
       - DATABASE_URL=postgresql://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-nexus_config_secret}@postgres:5432/${POSTGRES_DB:-nexus_config}
-      - HISTORIAN_URL=postgresql://${HISTORIAN_USER:-nexus}:${HISTORIAN_PASSWORD:-nexus_historian_secret}@historian:5432/${HISTORIAN_DB:-nexus_historian}
-      # MQTT connection
-      - MQTT_URL=mqtt://emqx:1883
+      - DATABASE_POOL_SIZE=10
+      # MQTT connection for config notifications
+      - MQTT_BROKER_URL=mqtt://emqx:1883
+      - MQTT_CLIENT_ID=gateway-core
       - MQTT_USERNAME=${MQTT_GATEWAY_USER:-gateway}
       - MQTT_PASSWORD=${MQTT_GATEWAY_PASS:-gateway_secret}
-      # Internal services
-      - PROTOCOL_GATEWAY_URL=http://protocol-gateway:4000
-      - FLOW_ENGINE_URL=http://flow-engine:1880
-      - ORCHESTRATOR_URL=http://orchestrator:5000
-      - ALERT_SERVICE_URL=http://alert-service:6000
+      # CORS (for frontend)
+      - CORS_ORIGIN=http://localhost:5173,http://localhost:8080,http://web-ui
+      # JWT (for future auth)
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      - JWT_EXPIRES_IN=24h
     ports:
-      - "3000:3000"
+      - "3001:3001"
     volumes:
       - gateway-logs:/app/logs
     networks:
@@ -182,7 +181,7 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -418,18 +417,18 @@ services:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # NEXUS Control Center (React Frontend)
-  # Unified web interface
+  # Unified web interface (React + Vite + TailwindCSS)
+  # Serves static files via Nginx, proxies API calls to gateway-core
   # ─────────────────────────────────────────────────────────────────────────────
-  frontend:
+  web-ui:
     build:
-      context: ../../frontend
+      context: ../../services/web-ui
       dockerfile: Dockerfile
       args:
         - VITE_API_URL=/api
-        - VITE_WS_URL=/ws
-    image: nexus/frontend:${VERSION:-latest}
-    container_name: nexus-frontend
-    hostname: frontend
+    image: nexus/web-ui:${VERSION:-latest}
+    container_name: nexus-web-ui
+    hostname: web-ui
     restart: unless-stopped
     ports:
       - "8080:80"
@@ -438,7 +437,7 @@ services:
     depends_on:
       - gateway-core
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -462,14 +461,14 @@ services:
     networks:
       - nexus-internal
     depends_on:
-      - frontend
+      - web-ui
       - gateway-core
 
   # ═══════════════════════════════════════════════════════════════════════════
   # OPTIONAL: GRAFANA (for advanced visualization)
   # Can be used alongside or instead of native dashboards
   # ═══════════════════════════════════════════════════════════════════════════
-  
+
   grafana:
     image: grafana/grafana:10.2.2
     container_name: nexus-grafana

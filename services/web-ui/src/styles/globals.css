@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light theme - industrial clean */
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 201 96% 32%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 20% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 20% 96%;
+    --muted-foreground: 215 16% 47%;
+    --accent: 210 20% 96%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214 20% 90%;
+    --input: 214 20% 90%;
+    --ring: 201 96% 32%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark theme - industrial edge */
+    --background: 222 47% 6%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222 47% 8%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 199 89% 48%;
+    --primary-foreground: 222 47% 6%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+    --accent: 217 33% 17%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 33% 17%;
+    --input: 217 33% 17%;
+    --ring: 199 89% 48%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-muted/50;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/30 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-foreground/50;
+  }
+}
+
+@layer components {
+  /* Status indicator dot */
+  .status-dot {
+    @apply w-2.5 h-2.5 rounded-full;
+  }
+
+  .status-dot-online {
+    @apply bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)];
+  }
+
+  .status-dot-offline {
+    @apply bg-slate-500;
+  }
+
+  .status-dot-error {
+    @apply bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)] animate-pulse-status;
+  }
+
+  .status-dot-unknown {
+    @apply bg-yellow-500;
+  }
+
+  /* Protocol badges */
+  .protocol-badge {
+    @apply px-2 py-0.5 rounded text-xs font-medium uppercase tracking-wide;
+  }
+
+  .protocol-badge-modbus {
+    @apply bg-blue-500/20 text-blue-400 border border-blue-500/30;
+  }
+
+  .protocol-badge-opcua {
+    @apply bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  }
+
+  .protocol-badge-s7 {
+    @apply bg-violet-500/20 text-violet-400 border border-violet-500/30;
+  }
+
+  /* Grid pattern background */
+  .bg-grid-pattern {
+    background-image: linear-gradient(
+        to right,
+        hsl(var(--border)) 1px,
+        transparent 1px
+      ),
+      linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* Gradient glow effect */
+  .glow-primary {
+    box-shadow:
+      0 0 20px -5px hsl(var(--primary) / 0.3),
+      0 0 40px -10px hsl(var(--primary) / 0.2);
+  }
+}
+
+@layer utilities {
+  /* Animation delays for staggered effects */
+  .animation-delay-100 {
+    animation-delay: 100ms;
+  }
+  .animation-delay-200 {
+    animation-delay: 200ms;
+  }
+  .animation-delay-300 {
+    animation-delay: 300ms;
+  }
+  .animation-delay-400 {
+    animation-delay: 400ms;
+  }
+  .animation-delay-500 {
+    animation-delay: 500ms;
+  }
+}
+

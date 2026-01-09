@@ -1,17 +1,28 @@
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- NEXUS EDGE - Configuration Database Schema
--- PostgreSQL initialization script
+-- PostgreSQL initialization script (Phase 3 compatible)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- Enable UUID extension
+-- Enable extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- USERS & AUTHENTICATION
+-- ENUMS
 -- ═══════════════════════════════════════════════════════════════════════════════
 
+CREATE TYPE protocol AS ENUM ('modbus', 'opcua', 's7');
+CREATE TYPE device_status AS ENUM ('online', 'offline', 'error', 'unknown');
+CREATE TYPE tag_data_type AS ENUM (
+    'bool', 'int16', 'int32', 'int64',
+    'uint16', 'uint32', 'uint64',
+    'float32', 'float64', 'string'
+);
 CREATE TYPE user_role AS ENUM ('admin', 'engineer', 'operator', 'viewer');
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- USERS & AUTHENTICATION
+-- ═══════════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -56,125 +67,93 @@ VALUES (
 ) ON CONFLICT (username) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- DEVICES & TAGS
+-- DEVICES (Phase 3 Schema - Gateway Core compatible)
 -- ═══════════════════════════════════════════════════════════════════════════════
-
-CREATE TYPE protocol_type AS ENUM ('S7', 'OPCUA', 'MODBUS', 'MQTT');
-CREATE TYPE device_status AS ENUM ('connected', 'disconnected', 'error', 'unknown');
 
 CREATE TABLE IF NOT EXISTS devices (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name            VARCHAR(255) NOT NULL,
-    description     TEXT,
-    protocol        protocol_type NOT NULL,
-    enabled         BOOLEAN DEFAULT TRUE,
-    
-    -- Connection configuration (JSON for flexibility across protocols)
-    connection      JSONB NOT NULL,
-    
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name                VARCHAR(255) NOT NULL UNIQUE,
+    description         TEXT,
+    protocol            protocol NOT NULL,
+    enabled             BOOLEAN NOT NULL DEFAULT TRUE,
+
+    -- Connection settings (explicit columns for type safety)
+    host                VARCHAR(255) NOT NULL,
+    port                INTEGER NOT NULL,
+    protocol_config     JSONB DEFAULT '{}'::jsonb,
+
+    -- Polling configuration
+    poll_interval_ms    INTEGER NOT NULL DEFAULT 1000,
+
     -- Status (updated by protocol gateway)
-    status          device_status DEFAULT 'unknown',
-    last_seen       TIMESTAMPTZ,
-    error_count     INTEGER DEFAULT 0,
-    last_error      TEXT,
-    
+    status              device_status NOT NULL DEFAULT 'unknown',
+    last_seen           TIMESTAMPTZ,
+    last_error          TEXT,
+
     -- Metadata
-    location        VARCHAR(255),
-    manufacturer    VARCHAR(255),
-    model           VARCHAR(255),
-    firmware        VARCHAR(255),
-    
-    created_by      UUID REFERENCES users(id),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
+    location            VARCHAR(255),
+    metadata            JSONB DEFAULT '{}'::jsonb,
+
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS device_tags (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    device_id       UUID REFERENCES devices(id) ON DELETE CASCADE,
-    name            VARCHAR(255) NOT NULL,
-    address         VARCHAR(255) NOT NULL,
-    data_type       VARCHAR(50) NOT NULL,
-    
-    -- MQTT topic mapping
-    mqtt_topic      VARCHAR(512) NOT NULL,
-    
-    -- Scaling configuration
-    scaling_enabled BOOLEAN DEFAULT FALSE,
-    raw_min         DOUBLE PRECISION,
-    raw_max         DOUBLE PRECISION,
-    eng_min         DOUBLE PRECISION,
-    eng_max         DOUBLE PRECISION,
-    
-    engineering_unit VARCHAR(50),
-    
-    enabled         BOOLEAN DEFAULT TRUE,
-    poll_interval   INTEGER,  -- Override device default (ms)
-    
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW(),
-    
-    UNIQUE(device_id, address)
-);
-
-CREATE INDEX idx_device_tags_device ON device_tags(device_id);
-CREATE INDEX idx_device_tags_topic ON device_tags(mqtt_topic);
+CREATE UNIQUE INDEX IF NOT EXISTS devices_name_idx ON devices(name);
+CREATE INDEX IF NOT EXISTS devices_protocol_idx ON devices(protocol);
+CREATE INDEX IF NOT EXISTS devices_status_idx ON devices(status);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- FLOWS (Node-RED compatible)
+-- TAGS (Phase 3 Schema - Gateway Core compatible)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-CREATE TYPE flow_status AS ENUM ('stopped', 'running', 'error');
+CREATE TABLE IF NOT EXISTS tags (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    device_id           UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    name                VARCHAR(255) NOT NULL,
+    description         TEXT,
+    enabled             BOOLEAN NOT NULL DEFAULT TRUE,
 
-CREATE TABLE IF NOT EXISTS flows (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name            VARCHAR(255) NOT NULL,
-    description     TEXT,
-    
-    -- Node-RED flow JSON
-    definition      JSONB NOT NULL,
-    
-    status          flow_status DEFAULT 'stopped',
-    enabled         BOOLEAN DEFAULT TRUE,
-    
-    -- Version control
-    version         INTEGER DEFAULT 1,
-    
-    created_by      UUID REFERENCES users(id),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
+    -- Address (protocol-specific)
+    address             VARCHAR(512) NOT NULL,
+    data_type           tag_data_type NOT NULL,
+
+    -- Transformations
+    scale_factor        INTEGER,
+    scale_offset        INTEGER,
+    clamp_min           INTEGER,
+    clamp_max           INTEGER,
+    engineering_units   VARCHAR(50),
+
+    -- Deadband (Phase 4)
+    deadband_absolute   INTEGER,
+    deadband_percent    INTEGER,
+
+    -- Custom MQTT topic
+    custom_topic        VARCHAR(512),
+
+    -- Metadata
+    metadata            JSONB DEFAULT '{}'::jsonb,
+
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(device_id, name)
 );
 
-CREATE TABLE IF NOT EXISTS flow_versions (
-    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    flow_id         UUID REFERENCES flows(id) ON DELETE CASCADE,
-    version         INTEGER NOT NULL,
-    definition      JSONB NOT NULL,
-    comment         TEXT,
-    created_by      UUID REFERENCES users(id),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    
-    UNIQUE(flow_id, version)
-);
+CREATE INDEX IF NOT EXISTS tags_device_idx ON tags(device_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- DASHBOARDS & WIDGETS
+-- DASHBOARDS & WIDGETS (Phase 4+)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS dashboards (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(255) NOT NULL,
     description     TEXT,
-    
-    -- Grid layout configuration
     layout          JSONB NOT NULL DEFAULT '{"columns": 12, "rowHeight": 50}'::jsonb,
-    
-    -- Theme/styling
     theme           JSONB DEFAULT '{}'::jsonb,
-    
     is_default      BOOLEAN DEFAULT FALSE,
     is_public       BOOLEAN DEFAULT FALSE,
-    
     created_by      UUID REFERENCES users(id),
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
@@ -190,24 +169,17 @@ CREATE TABLE IF NOT EXISTS widgets (
     dashboard_id    UUID REFERENCES dashboards(id) ON DELETE CASCADE,
     name            VARCHAR(255) NOT NULL,
     type            widget_type NOT NULL,
-    
-    -- Position on grid (react-grid-layout compatible)
-    position        JSONB NOT NULL,  -- {x, y, w, h}
-    
-    -- Widget-specific configuration
+    position        JSONB NOT NULL,
     config          JSONB NOT NULL DEFAULT '{}'::jsonb,
-    
-    -- Data binding (MQTT topics or historian queries)
     data_source     JSONB NOT NULL,
-    
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_widgets_dashboard ON widgets(dashboard_id);
+CREATE INDEX IF NOT EXISTS widgets_dashboard_idx ON widgets(dashboard_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- ALERTS
+-- ALERTS (Phase 4+)
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 CREATE TYPE alert_severity AS ENUM ('info', 'warning', 'critical');
@@ -219,20 +191,11 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     description     TEXT,
     enabled         BOOLEAN DEFAULT TRUE,
     severity        alert_severity NOT NULL DEFAULT 'warning',
-    
-    -- Rule condition (JSON for flexibility)
     condition       JSONB NOT NULL,
-    
-    -- Debouncing
-    trigger_delay   INTEGER DEFAULT 0,  -- ms
-    clear_delay     INTEGER DEFAULT 0,  -- ms
-    
-    -- Notification channels
+    trigger_delay   INTEGER DEFAULT 0,
+    clear_delay     INTEGER DEFAULT 0,
     notifications   JSONB DEFAULT '{}'::jsonb,
-    
-    -- Escalation config
     escalation      JSONB,
-    
     created_by      UUID REFERENCES users(id),
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
@@ -242,22 +205,18 @@ CREATE TABLE IF NOT EXISTS alert_instances (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     rule_id         UUID REFERENCES alert_rules(id) ON DELETE CASCADE,
     state           alert_state NOT NULL DEFAULT 'active',
-    
     triggered_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     acknowledged_at TIMESTAMPTZ,
     acknowledged_by UUID REFERENCES users(id),
     cleared_at      TIMESTAMPTZ,
-    
-    -- Context at time of trigger
     trigger_value   DOUBLE PRECISION,
     trigger_topic   VARCHAR(512),
     context         JSONB DEFAULT '{}'::jsonb,
-    
     notes           TEXT
 );
 
-CREATE INDEX idx_alert_instances_rule ON alert_instances(rule_id);
-CREATE INDEX idx_alert_instances_state ON alert_instances(state) WHERE state != 'normal';
+CREATE INDEX IF NOT EXISTS alert_instances_rule_idx ON alert_instances(rule_id);
+CREATE INDEX IF NOT EXISTS alert_instances_state_idx ON alert_instances(state) WHERE state != 'normal';
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- SYSTEM CONFIGURATION
@@ -270,13 +229,11 @@ CREATE TABLE IF NOT EXISTS system_config (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Default system configuration
 INSERT INTO system_config (key, value, description) VALUES
     ('mqtt.broker', '{"host": "emqx", "port": 1883}'::jsonb, 'MQTT broker connection'),
     ('historian.retention', '{"raw": "30d", "1min": "90d", "1hour": "1y", "1day": "5y"}'::jsonb, 'Data retention policies'),
     ('ui.theme', '"industrial-dark"'::jsonb, 'Default UI theme'),
-    ('security.session_timeout', '86400'::jsonb, 'Session timeout in seconds'),
-    ('security.password_policy', '{"min_length": 8, "require_special": true}'::jsonb, 'Password requirements')
+    ('security.session_timeout', '86400'::jsonb, 'Session timeout in seconds')
 ON CONFLICT (key) DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -301,15 +258,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp       TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_audit_log_user ON audit_log(user_id);
-CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp DESC);
-CREATE INDEX idx_audit_log_resource ON audit_log(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS audit_log_timestamp_idx ON audit_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS audit_log_resource_idx ON audit_log(resource_type, resource_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- HELPER FUNCTIONS
+-- TRIGGERS FOR UPDATED_AT
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- Automatically update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -318,43 +274,60 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply trigger to all tables with updated_at
-CREATE TRIGGER update_users_updated_at
-    BEFORE UPDATE ON users
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_devices_updated_at
-    BEFORE UPDATE ON devices
+CREATE TRIGGER update_devices_updated_at BEFORE UPDATE ON devices
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_device_tags_updated_at
-    BEFORE UPDATE ON device_tags
+CREATE TRIGGER update_tags_updated_at BEFORE UPDATE ON tags
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_flows_updated_at
-    BEFORE UPDATE ON flows
+CREATE TRIGGER update_dashboards_updated_at BEFORE UPDATE ON dashboards
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_dashboards_updated_at
-    BEFORE UPDATE ON dashboards
+CREATE TRIGGER update_widgets_updated_at BEFORE UPDATE ON widgets
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-CREATE TRIGGER update_widgets_updated_at
-    BEFORE UPDATE ON widgets
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-
-CREATE TRIGGER update_alert_rules_updated_at
-    BEFORE UPDATE ON alert_rules
+CREATE TRIGGER update_alert_rules_updated_at BEFORE UPDATE ON alert_rules
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- VALIDATION COMPLETE
+-- SAMPLE DATA (Development)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+INSERT INTO devices (name, description, protocol, host, port, protocol_config, poll_interval_ms, location)
+VALUES
+    ('PLC-001', 'Main production line PLC', 'modbus', '192.168.1.10', 502,
+     '{"unitId": 1, "timeout": 5000}'::jsonb, 1000, 'Building A - Line 1'),
+    ('OPC-001', 'SCADA server OPC UA', 'opcua', '192.168.1.20', 4840,
+     '{"securityPolicy": "Basic256Sha256", "securityMode": "SignAndEncrypt"}'::jsonb, 500, 'Control Room'),
+    ('S7-001', 'Siemens S7-1500', 's7', '192.168.1.30', 102,
+     '{"rack": 0, "slot": 1, "pduSize": 480}'::jsonb, 250, 'Building B - Packaging')
+ON CONFLICT (name) DO NOTHING;
+
+-- Insert sample tags for PLC-001
+INSERT INTO tags (device_id, name, description, address, data_type, engineering_units)
+SELECT
+    d.id, t.name, t.description, t.address, t.data_type::tag_data_type, t.units
+FROM devices d
+CROSS JOIN (VALUES
+    ('Temperature', 'Motor temperature', '40001', 'float32', '°C'),
+    ('Pressure', 'Line pressure', '40003', 'float32', 'bar'),
+    ('Speed', 'Motor speed', '40005', 'uint16', 'rpm'),
+    ('Running', 'Motor running status', '00001', 'bool', NULL),
+    ('Alarm', 'Alarm status', '00002', 'bool', NULL)
+) AS t(name, description, address, data_type, units)
+WHERE d.name = 'PLC-001'
+ON CONFLICT (device_id, name) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- DONE
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 DO $$
 BEGIN
     RAISE NOTICE 'NEXUS Edge Configuration database initialized successfully';
-    RAISE NOTICE 'Default admin user created: admin / nexus-admin-2024!';
-    RAISE NOTICE 'IMPORTANT: Change the default password immediately!';
+    RAISE NOTICE 'Default admin user: admin / nexus-admin-2024!';
+    RAISE NOTICE 'Sample devices created: PLC-001, OPC-001, S7-001';
 END $$;
-
