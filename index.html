@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS Edge Platform - Quick Start Guide</title>
+    <style>
+      :root {
+        --bg-dark: #0f172a;
+        --bg-card: #1e293b;
+        --bg-code: #0d1117;
+        --text-primary: #f1f5f9;
+        --text-secondary: #94a3b8;
+        --accent: #3b82f6;
+        --accent-hover: #60a5fa;
+        --success: #22c55e;
+        --warning: #f59e0b;
+        --border: #334155;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        background: var(--bg-dark);
+        color: var(--text-primary);
+        line-height: 1.6;
+        padding: 2rem;
+      }
+
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      header {
+        text-align: center;
+        margin-bottom: 3rem;
+        padding-bottom: 2rem;
+        border-bottom: 1px solid var(--border);
+      }
+
+      h1 {
+        font-size: 2.5rem;
+        margin-bottom: 0.5rem;
+        background: linear-gradient(135deg, var(--accent), var(--success));
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .tagline {
+        color: var(--text-secondary);
+        font-size: 1.1rem;
+      }
+
+      h2 {
+        color: var(--accent);
+        margin: 2rem 0 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid var(--border);
+      }
+
+      h3 {
+        color: var(--text-primary);
+        margin: 1.5rem 0 0.75rem;
+      }
+
+      .card {
+        background: var(--bg-card);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border: 1px solid var(--border);
+      }
+
+      .card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 1.5rem;
+        margin: 1.5rem 0;
+      }
+
+      .card h3 {
+        margin-top: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .badge-recommended {
+        background: var(--success);
+        color: var(--bg-dark);
+      }
+
+      .badge-advanced {
+        background: var(--warning);
+        color: var(--bg-dark);
+      }
+
+      pre {
+        background: var(--bg-code);
+        border-radius: 8px;
+        padding: 1rem;
+        overflow-x: auto;
+        margin: 0.75rem 0;
+        border: 1px solid var(--border);
+      }
+
+      code {
+        font-family: 'Fira Code', 'SF Mono', Consolas, monospace;
+        font-size: 0.9rem;
+      }
+
+      .command {
+        color: var(--success);
+      }
+
+      .comment {
+        color: var(--text-secondary);
+      }
+
+      ul,
+      ol {
+        padding-left: 1.5rem;
+        margin: 0.75rem 0;
+      }
+
+      li {
+        margin: 0.5rem 0;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        color: var(--accent-hover);
+        text-decoration: underline;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1rem 0;
+      }
+
+      th,
+      td {
+        padding: 0.75rem;
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+      }
+
+      th {
+        color: var(--text-secondary);
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+      }
+
+      .step-number {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        background: var(--accent);
+        color: white;
+        border-radius: 50%;
+        font-weight: bold;
+        font-size: 0.875rem;
+        margin-right: 0.75rem;
+      }
+
+      .tip {
+        background: rgba(59, 130, 246, 0.1);
+        border-left: 4px solid var(--accent);
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0 8px 8px 0;
+      }
+
+      .warning {
+        background: rgba(245, 158, 11, 0.1);
+        border-left: 4px solid var(--warning);
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 0 8px 8px 0;
+      }
+
+      footer {
+        margin-top: 3rem;
+        padding-top: 2rem;
+        border-top: 1px solid var(--border);
+        text-align: center;
+        color: var(--text-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>NEXUS Edge Platform</h1>
+        <p class="tagline">Industrial IoT Platform - Quick Start Guide</p>
+      </header>
+
+      <h2>Prerequisites</h2>
+      <div class="card">
+        <table>
+          <tr>
+            <th>Tool</th>
+            <th>Required</th>
+            <th>Installation</th>
+          </tr>
+          <tr>
+            <td><strong>Docker</strong></td>
+            <td>Yes</td>
+            <td><a href="https://docs.docker.com/get-docker/">docs.docker.com</a></td>
+          </tr>
+          <tr>
+            <td><strong>Docker Compose</strong></td>
+            <td>Yes</td>
+            <td>Included with Docker Desktop</td>
+          </tr>
+          <tr>
+            <td><strong>Go 1.22+</strong></td>
+            <td>For development</td>
+            <td><a href="https://go.dev/dl/">go.dev/dl</a></td>
+          </tr>
+          <tr>
+            <td><strong>Node.js 20+</strong></td>
+            <td>For development</td>
+            <td><a href="https://nodejs.org/">nodejs.org</a></td>
+          </tr>
+          <tr>
+            <td><strong>kubectl</strong></td>
+            <td>For Kubernetes</td>
+            <td><a href="https://kubernetes.io/docs/tasks/tools/">kubernetes.io</a></td>
+          </tr>
+        </table>
+      </div>
+
+      <h2>Quick Start Options</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <h3><span class="badge badge-recommended">Recommended</span></h3>
+          <h3>Option 1: Docker Compose</h3>
+          <p>Start the entire platform with one command. Best for evaluation and development.</p>
+          <pre><code><span class="comment"># Navigate to docker directory</span>
+<span class="command">cd infrastructure/docker</span>
+
+<span class="comment"># Start all services</span>
+<span class="command">docker-compose up -d</span>
+
+<span class="comment"># View logs</span>
+<span class="command">docker-compose logs -f</span></code></pre>
+
+          <h4 style="margin-top: 1rem">Services Started:</h4>
+          <table>
+            <tr>
+              <td>EMQX Dashboard</td>
+              <td><a href="http://localhost:18083">localhost:18083</a></td>
+              <td>admin / public</td>
+            </tr>
+            <tr>
+              <td>Protocol Gateway</td>
+              <td><a href="http://localhost:8080">localhost:8080</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>Data Ingestion</td>
+              <td><a href="http://localhost:8081">localhost:8081</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>TimescaleDB</td>
+              <td>localhost:5432</td>
+              <td>postgres / postgres</td>
+            </tr>
+          </table>
+        </div>
+
+        <div class="card">
+          <h3>Option 2: Make Commands</h3>
+          <p>Use the Makefile for common operations. Requires Make installed.</p>
+          <pre><code><span class="comment"># Install dependencies</span>
+<span class="command">make install</span>
+
+<span class="comment"># Start development environment</span>
+<span class="command">make dev</span>
+
+<span class="comment"># Run tests</span>
+<span class="command">make test</span>
+
+<span class="comment"># Build all services</span>
+<span class="command">make build</span>
+
+<span class="comment"># View all commands</span>
+<span class="command">make help</span></code></pre>
+        </div>
+
+        <div class="card">
+          <h3><span class="badge badge-advanced">Advanced</span></h3>
+          <h3>Option 3: Kubernetes</h3>
+          <p>Deploy to a Kubernetes cluster. Requires kubectl and a running cluster.</p>
+          <pre><code><span class="comment"># Development deployment</span>
+<span class="command">kubectl apply -k infrastructure/k8s/overlays/dev</span>
+
+<span class="comment"># Production deployment</span>
+<span class="command">kubectl apply -k infrastructure/k8s/overlays/prod</span>
+
+<span class="comment"># Check status</span>
+<span class="command">kubectl get pods -n nexus-system</span>
+
+<span class="comment"># View logs</span>
+<span class="command">kubectl logs -f -n nexus-system \
+  -l app.kubernetes.io/part-of=nexus-edge</span></code></pre>
+        </div>
+      </div>
+
+      <h2>Step-by-Step: Docker Compose</h2>
+
+      <div class="card">
+        <h3><span class="step-number">1</span>Clone the Repository</h3>
+        <pre><code><span class="command">git clone https://github.com/your-org/nexus-edge.git</span>
+<span class="command">cd nexus-edge</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3><span class="step-number">2</span>Configure Environment (Optional)</h3>
+        <pre><code><span class="comment"># Copy the template</span>
+<span class="command">cp infrastructure/docker/env.template infrastructure/docker/.env</span>
+
+<span class="comment"># Edit as needed (defaults work for local dev)</span>
+<span class="command">nano infrastructure/docker/.env</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3><span class="step-number">3</span>Start Services</h3>
+        <pre><code><span class="command">cd infrastructure/docker</span>
+<span class="command">docker-compose up -d</span></code></pre>
+        <div class="tip">
+          <strong>Tip:</strong> First run downloads images (~2GB). Subsequent starts are instant.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="step-number">4</span>Verify Services</h3>
+        <pre><code><span class="comment"># Check all containers are running</span>
+<span class="command">docker-compose ps</span>
+
+<span class="comment"># Expected output:</span>
+NAME                STATUS
+emqx                Up (healthy)
+protocol-gateway    Up (healthy)
+data-ingestion      Up (healthy)
+timescaledb         Up (healthy)</code></pre>
+      </div>
+
+      <div class="card">
+        <h3><span class="step-number">5</span>Access Dashboards</h3>
+        <ul>
+          <li>
+            <strong>EMQX Dashboard:</strong>
+            <a href="http://localhost:18083">http://localhost:18083</a> (admin / public)
+          </li>
+          <li>
+            <strong>Protocol Gateway Health:</strong>
+            <a href="http://localhost:8080/health">http://localhost:8080/health</a>
+          </li>
+          <li>
+            <strong>Data Ingestion Health:</strong>
+            <a href="http://localhost:8081/health">http://localhost:8081/health</a>
+          </li>
+        </ul>
+      </div>
+
+      <h2>Common Operations</h2>
+
+      <div class="card">
+        <h3>Stop Services</h3>
+        <pre><code><span class="command">cd infrastructure/docker</span>
+<span class="command">docker-compose down</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>View Logs</h3>
+        <pre><code><span class="comment"># All services</span>
+<span class="command">docker-compose logs -f</span>
+
+<span class="comment"># Specific service</span>
+<span class="command">docker-compose logs -f protocol-gateway</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Restart a Service</h3>
+        <pre><code><span class="command">docker-compose restart protocol-gateway</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Clean Up (Remove Data)</h3>
+        <pre><code><span class="comment"># Stop and remove volumes (deletes all data!)</span>
+<span class="command">docker-compose down -v</span></code></pre>
+        <div class="warning">
+          <strong>Warning:</strong> This deletes all stored data including TimescaleDB history.
+        </div>
+      </div>
+
+      <h2>Development Workflow</h2>
+
+      <div class="card">
+        <h3>Run Protocol Gateway Locally (with hot reload)</h3>
+        <pre><code><span class="comment"># Terminal 1: Start infrastructure</span>
+<span class="command">cd infrastructure/docker</span>
+<span class="command">docker-compose up -d emqx timescaledb</span>
+
+<span class="comment"># Terminal 2: Run gateway with air (hot reload)</span>
+<span class="command">cd services/protocol-gateway</span>
+<span class="command">air</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Build Docker Images Locally</h3>
+        <pre><code><span class="comment"># Build all images</span>
+<span class="command">make docker-build</span>
+
+<span class="comment"># Or build individually</span>
+<span class="command">docker build -t nexus/protocol-gateway:dev services/protocol-gateway</span>
+<span class="command">docker build -t nexus/data-ingestion:dev services/data-ingestion</span></code></pre>
+      </div>
+
+      <h2>Troubleshooting</h2>
+
+      <div class="card">
+        <h3>Container won't start</h3>
+        <pre><code><span class="comment"># Check logs for errors</span>
+<span class="command">docker-compose logs protocol-gateway</span>
+
+<span class="comment"># Check if ports are in use</span>
+<span class="command">netstat -an | grep 8080</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Connection refused to EMQX</h3>
+        <pre><code><span class="comment"># Wait for EMQX to be healthy</span>
+<span class="command">docker-compose ps</span>
+
+<span class="comment"># Check EMQX logs</span>
+<span class="command">docker-compose logs emqx</span></code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Reset everything</h3>
+        <pre><code><span class="comment"># Nuclear option - removes all containers and data</span>
+<span class="command">docker-compose down -v --remove-orphans</span>
+<span class="command">docker system prune -f</span>
+<span class="command">docker-compose up -d</span></code></pre>
+      </div>
+
+      <h2>Project Structure</h2>
+      <div class="card">
+        <pre><code>nexus-edge/
+├── services/
+│   ├── protocol-gateway/    <span class="comment"># Go - Device communication</span>
+│   ├── data-ingestion/      <span class="comment"># Go - TimescaleDB writer</span>
+│   ├── gateway-core/        <span class="comment"># TypeScript - Management API</span>
+│   └── web-ui/              <span class="comment"># React - Web interface</span>
+├── infrastructure/
+│   ├── docker/              <span class="comment"># Docker Compose files</span>
+│   └── k8s/                 <span class="comment"># Kubernetes manifests</span>
+├── config/                  <span class="comment"># Configuration files</span>
+├── docs/                    <span class="comment"># Documentation</span>
+├── Makefile                 <span class="comment"># Build commands</span>
+└── ROADMAP.md               <span class="comment"># Development roadmap</span></code></pre>
+      </div>
+
+      <h2>Useful Links</h2>
+      <div class="card">
+        <ul>
+          <li><a href="./README.md">README.md</a> - Full project documentation</li>
+          <li><a href="./ROADMAP.md">ROADMAP.md</a> - Development roadmap and progress</li>
+          <li><a href="./docs/ARCHITECTURE.md">Architecture Guide</a> - System design details</li>
+          <li>
+            <a href="./infrastructure/k8s/README.md">Kubernetes Guide</a> - K8s deployment
+            instructions
+          </li>
+          <li>
+            <a href="./docs/services/protocol-gateway/readme.md">Protocol Gateway Docs</a> - Gateway
+            configuration
+          </li>
+        </ul>
+      </div>
+
+      <footer>
+        <p>
+          NEXUS Edge Platform &copy; 2026 | <a href="./ROADMAP.md">View Roadmap</a> |
+          <a href="https://github.com/your-org/nexus-edge">GitHub</a>
+        </p>
+      </footer>
+    </div>
+  </body>
+</html>

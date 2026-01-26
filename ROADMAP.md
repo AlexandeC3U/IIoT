@@ -48,13 +48,14 @@ Build a **lightweight, scalable, and production-ready** Industrial IoT platform 
 
 | Component                   | Status      | Description                                 |
 | --------------------------- | ----------- | ------------------------------------------- |
-| **Protocol Gateway**        | ✅ Complete | Go service for device communication         |
+| **Protocol Gateway**        | ✅ Hardened | Go service for device communication         |
 | ├─ Modbus TCP/RTU           | ✅ Complete | Holding/Input registers, coils, batch reads |
-| ├─ OPC UA                   | ✅ Complete | Polling + subscriptions, security policies  |
+| ├─ OPC UA                   | ✅ Hardened | Polling, security, session limit handling   |
 | ├─ Siemens S7               | ✅ Complete | S7-300/400/1200/1500 support                |
-| ├─ Connection Pooling       | ✅ Complete | Reusable connections per device             |
-| ├─ Circuit Breakers         | ✅ Complete | Fail-fast on device issues                  |
-| └─ Worker Pool              | ✅ Complete | Bounded concurrency with back-pressure      |
+| ├─ Connection Pooling       | ✅ Hardened | Per-device circuit breakers, 500 conn limit |
+| ├─ Circuit Breakers         | ✅ Hardened | Per-device isolation (not pool-wide)        |
+| ├─ Worker Pool              | ✅ Complete | Bounded concurrency with back-pressure      |
+| └─ Rate Limiting            | ✅ Complete | Per-device token bucket rate limiter        |
 | **MQTT Integration**        | ✅ Complete | EMQX broker with UNS topics                 |
 | ├─ Publish Telemetry        | ✅ Complete | QoS 1, auto-reconnect, buffering            |
 | ├─ Write Commands           | ✅ Complete | Bidirectional via $nexus/cmd/#              |
@@ -205,6 +206,44 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 | sync.Pool for slices  | Reduced GC pressure during high-rate polling               |
 | Bounded command queue | Memory-safe under command bursts                           |
 | Enhanced metrics      | skipped_polls, worker_pool_utilization, per-device latency |
+
+### Protocol Gateway Hardening (January 2026) ✅
+
+Production-readiness improvements following senior engineer review:
+
+| Category          | Task                              | Status      | Description                                                                                         |
+| ----------------- | --------------------------------- | ----------- | --------------------------------------------------------------------------------------------------- |
+| **P0 - Critical** | Topic/Tag Mapping Bug             | ✅ Complete | Fixed index-based tag lookup; now uses TagID map to prevent data routing to wrong MQTT topics       |
+| **P0 - Critical** | OPC UA Session Limit Handling     | ✅ Complete | Added `StatusBadTooManySessions` detection with 5-minute extended backoff; prevents server DoS      |
+| **P0 - Critical** | Reconnect State Observability     | ✅ Complete | Added session backoff metrics, `GetSessionBackoffState()` for monitoring                            |
+| **P1 - High**     | OPC UA Per-Device Circuit Breaker | ✅ Complete | Moved from pool-wide to per-device; one failing device no longer affects others                     |
+| **P1 - High**     | Modbus Per-Device Circuit Breaker | ✅ Complete | Same isolation pattern applied to Modbus pool                                                       |
+| **P1 - High**     | Concurrent Reconnect Prevention   | ✅ Complete | Health check now respects session backoff; prevents reconnect storms                                |
+| **P2 - Medium**   | Scale Configuration               | ✅ Complete | Increased `max_connections` default from 50/100 to 500 for industrial scale                         |
+| **P2 - Medium**   | Per-Device Rate Limiting          | ✅ Complete | Token bucket rate limiter with configurable `min_interval`, `max_requests_per_second`, `burst_size` |
+
+**Key Files Modified:**
+
+- `internal/adapter/opcua/client.go` - Session limit detection, extended backoff, error classification
+- `internal/adapter/opcua/pool.go` - Per-device circuit breakers, device health API
+- `internal/adapter/modbus/pool.go` - Per-device circuit breakers, device health API
+- `internal/service/polling.go` - TagID-based topic mapping, rate limiter integration
+- `internal/service/ratelimiter.go` - New token bucket rate limiter implementation
+- `internal/domain/device.go` - Added `RateLimitConfig` struct
+- `internal/domain/errors.go` - Added `ErrOPCUASessionLimit`
+- `config/config.yaml` - Updated defaults for scale
+
+### Protocol Gateway - Remaining Items (Next Cycle)
+
+The following P3 optimizations are deferred to the next development cycle:
+
+| Task                           | Priority | Description                                                                                          |
+| ------------------------------ | -------- | ---------------------------------------------------------------------------------------------------- |
+| **OPC UA Subscription Mode**   | P3 - Low | Implement Report-by-Exception for high tag counts; reduces polling overhead for slow-changing values |
+| **S7 Block Reads**             | P3 - Low | Batch reads by memory area instead of per-tag; reduces PLC communication overhead                    |
+| **Jittered Scheduling Config** | P3 - Low | Make poll interval jitter configurable (currently fixed at 0-10%); allow per-device jitter settings  |
+
+These optimizations improve efficiency but are not required for production deployment.
 
 ---
 
@@ -814,7 +853,8 @@ The Web UI is designed as a **single React application** that grows with each ph
 │           ├── Gateway Core API scaffolded ✅
 │           ├── Device/Tag CRUD APIs ✅
 │           ├── Web UI (Devices + System pages) ✅
-│           └── Docker Compose integration ✅
+│           ├── Docker Compose integration ✅
+│           └── Protocol Gateway Hardening ✅ (P0-P2 complete, P3 deferred)
 ├── Feb     Phase 3 Continues (WebSocket, Tag Browser, Auth)
 ├── Mar     Phase 3 Continues (RBAC, Normalizer)
 ├── Apr     Phase 3 Complete, Phase 4 Start (Analytics)
@@ -878,4 +918,4 @@ The Web UI is designed as a **single React application** that grows with each ph
 
 ---
 
-_Last updated: January 2026_
+_Last updated: January 26, 2026_

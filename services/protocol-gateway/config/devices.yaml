@@ -63,6 +63,7 @@ devices:
 
   # ========================================
   # MODBUS TCP - VFD / Motor Drive
+  # (with rate limiting example)
   # ========================================
   - id: modbus-vfd-001
     name: "Variable Frequency Drive"
@@ -78,6 +79,14 @@ devices:
     uns_prefix: plant-a/line-1/drives/vfd-001
     poll_interval: 500ms
     enabled: true
+    # Rate limiting protects devices from being overwhelmed
+    # Useful for sensitive devices or when poll_interval is very short
+    rate_limiting:
+      enabled: true
+      min_interval: 200ms        # Minimum 200ms between requests
+      # max_requests_per_second: 5   # Alternative: limit to 5 req/sec
+      burst_size: 2              # Allow up to 2 requests in quick succession
+      skip_on_limit: true        # Skip polls when limit hit (vs. waiting)
     tags:
       - id: speed
         name: "Motor Speed"

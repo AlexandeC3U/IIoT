@@ -65,9 +65,10 @@ type CircuitBreakerConfig struct {
 }
 
 // NewPool creates a new S7 connection pool.
+// Default MaxConnections is 500 to support industrial-scale deployments (100-1000 devices).
 func NewPool(config PoolConfig, logger zerolog.Logger) *Pool {
 	if config.MaxConnections == 0 {
-		config.MaxConnections = 100
+		config.MaxConnections = 500
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
@@ -203,7 +204,6 @@ func (p *Pool) ReadTag(ctx context.Context, device *domain.Device, tag *domain.T
 	result, err := entry.breaker.Execute(func() (interface{}, error) {
 		return entry.client.ReadTag(ctx, tag)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -235,7 +235,6 @@ func (p *Pool) ReadTags(ctx context.Context, device *domain.Device, tags []*doma
 	result, err := entry.breaker.Execute(func() (interface{}, error) {
 		return entry.client.ReadTags(ctx, tags)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -267,7 +266,6 @@ func (p *Pool) WriteTag(ctx context.Context, device *domain.Device, tag *domain.
 	_, err := entry.breaker.Execute(func() (interface{}, error) {
 		return nil, entry.client.WriteTag(ctx, tag, value)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -447,13 +445,13 @@ func (p *Pool) GetStats() PoolStats {
 	for id, entry := range p.clients {
 		clientStats := entry.client.GetStats()
 		stats.Devices = append(stats.Devices, DeviceStats{
-			DeviceID:       id,
-			Connected:      entry.client.IsConnected(),
-			LastUsed:       entry.lastUse,
-			ReadCount:      clientStats["read_count"],
-			WriteCount:     clientStats["write_count"],
-			ErrorCount:     clientStats["error_count"],
-			BreakerState:   entry.breaker.State().String(),
+			DeviceID:     id,
+			Connected:    entry.client.IsConnected(),
+			LastUsed:     entry.lastUse,
+			ReadCount:    clientStats["read_count"],
+			WriteCount:   clientStats["write_count"],
+			ErrorCount:   clientStats["error_count"],
+			BreakerState: entry.breaker.State().String(),
 		})
 	}
 
@@ -497,4 +495,3 @@ func (p *Pool) HealthCheck(ctx context.Context) error {
 
 	return domain.ErrConnectionClosed
 }
-

@@ -15,14 +15,14 @@ var (
 
 // Connection errors.
 var (
-	ErrConnectionFailed    = errors.New("connection failed")
-	ErrConnectionTimeout   = errors.New("connection timeout")
-	ErrConnectionClosed    = errors.New("connection closed")
-	ErrConnectionReset     = errors.New("connection reset by peer")
-	ErrMaxRetriesExceeded  = errors.New("maximum retry attempts exceeded")
-	ErrCircuitBreakerOpen  = errors.New("circuit breaker is open")
-	ErrPoolExhausted       = errors.New("connection pool exhausted")
-	ErrInvalidSlaveID      = errors.New("invalid slave ID")
+	ErrConnectionFailed   = errors.New("connection failed")
+	ErrConnectionTimeout  = errors.New("connection timeout")
+	ErrConnectionClosed   = errors.New("connection closed")
+	ErrConnectionReset    = errors.New("connection reset by peer")
+	ErrMaxRetriesExceeded = errors.New("maximum retry attempts exceeded")
+	ErrCircuitBreakerOpen = errors.New("circuit breaker is open")
+	ErrPoolExhausted      = errors.New("connection pool exhausted")
+	ErrInvalidSlaveID     = errors.New("invalid slave ID")
 )
 
 // Read/Write errors.
@@ -37,14 +37,14 @@ var (
 
 // Modbus-specific errors.
 var (
-	ErrModbusIllegalFunction   = errors.New("modbus: illegal function")
-	ErrModbusIllegalAddress    = errors.New("modbus: illegal data address")
-	ErrModbusIllegalValue      = errors.New("modbus: illegal data value")
-	ErrModbusDeviceFailure     = errors.New("modbus: slave device failure")
-	ErrModbusAcknowledge       = errors.New("modbus: acknowledge - long operation in progress")
-	ErrModbusBusy              = errors.New("modbus: slave device busy")
-	ErrModbusNegativeAck       = errors.New("modbus: negative acknowledge")
-	ErrModbusMemoryParityError = errors.New("modbus: memory parity error")
+	ErrModbusIllegalFunction        = errors.New("modbus: illegal function")
+	ErrModbusIllegalAddress         = errors.New("modbus: illegal data address")
+	ErrModbusIllegalValue           = errors.New("modbus: illegal data value")
+	ErrModbusDeviceFailure          = errors.New("modbus: slave device failure")
+	ErrModbusAcknowledge            = errors.New("modbus: acknowledge - long operation in progress")
+	ErrModbusBusy                   = errors.New("modbus: slave device busy")
+	ErrModbusNegativeAck            = errors.New("modbus: negative acknowledge")
+	ErrModbusMemoryParityError      = errors.New("modbus: memory parity error")
 	ErrModbusGatewayPathUnavailable = errors.New("modbus: gateway path unavailable")
 	ErrModbusGatewayTargetFailed    = errors.New("modbus: gateway target device failed to respond")
 )
@@ -59,15 +59,16 @@ var (
 
 // OPC UA specific errors.
 var (
-	ErrOPCUAInvalidNodeID       = errors.New("opcua: invalid node ID")
-	ErrOPCUASubscriptionFailed  = errors.New("opcua: subscription failed")
-	ErrOPCUABadStatus           = errors.New("opcua: bad status code")
-	ErrOPCUASecurityFailed      = errors.New("opcua: security negotiation failed")
-	ErrOPCUASessionExpired      = errors.New("opcua: session expired")
-	ErrOPCUABrowseFailed        = errors.New("opcua: browse failed")
-	ErrOPCUANodeNotFound        = errors.New("opcua: node not found")
-	ErrOPCUAAccessDenied        = errors.New("opcua: access denied")
-	ErrOPCUAWriteNotPermitted   = errors.New("opcua: write not permitted")
+	ErrOPCUAInvalidNodeID      = errors.New("opcua: invalid node ID")
+	ErrOPCUASubscriptionFailed = errors.New("opcua: subscription failed")
+	ErrOPCUABadStatus          = errors.New("opcua: bad status code")
+	ErrOPCUASecurityFailed     = errors.New("opcua: security negotiation failed")
+	ErrOPCUASessionExpired     = errors.New("opcua: session expired")
+	ErrOPCUABrowseFailed       = errors.New("opcua: browse failed")
+	ErrOPCUANodeNotFound       = errors.New("opcua: node not found")
+	ErrOPCUAAccessDenied       = errors.New("opcua: access denied")
+	ErrOPCUAWriteNotPermitted  = errors.New("opcua: write not permitted")
+	ErrOPCUASessionLimit       = errors.New("opcua: server at session limit, in extended backoff")
 )
 
 // S7 (Siemens) specific errors.
@@ -134,4 +135,3 @@ func ModbusExceptionToError(code byte) error {
 		return ErrReadFailed
 	}
 }
-

@@ -56,7 +56,15 @@ install-go: ## Install Go dependencies
 
 install-node: ## Install Node.js dependencies
 	@echo "$(BLUE)→ Installing Node.js dependencies...$(NC)"
-	@pnpm install
+	@if command -v pnpm >/dev/null 2>&1; then \
+		pnpm install; \
+	elif command -v npm >/dev/null 2>&1; then \
+		echo "$(YELLOW)pnpm not found, using npm...$(NC)"; \
+		npm install; \
+	else \
+		echo "$(YELLOW)No Node.js package manager found. Skipping Node.js dependencies.$(NC)"; \
+		echo "$(YELLOW)Install pnpm: npm install -g pnpm$(NC)"; \
+	fi
 	@echo "$(GREEN)✓ Node.js dependencies installed$(NC)"
 
 install-tools: ## Install development tools
@@ -111,22 +119,25 @@ test: go-test ## Run all tests
 
 go-test: ## Run Go tests
 	@echo "$(BLUE)→ Running Go tests...$(NC)"
-	@$(GO) test -v -race -short ./services/...
+	@cd services/protocol-gateway && $(GO) test -v -race -short ./...
+	@cd services/data-ingestion && $(GO) test -v -race -short ./...
 	@echo "$(GREEN)✓ Go tests passed$(NC)"
 
 go-test-cover: ## Run Go tests with coverage
 	@echo "$(BLUE)→ Running Go tests with coverage...$(NC)"
-	@$(GO) test -v -race -coverprofile=coverage.out -covermode=atomic ./services/...
-	@$(GO) tool cover -html=coverage.out -o coverage.html
-	@echo "$(GREEN)✓ Coverage report: coverage.html$(NC)"
+	@cd services/protocol-gateway && $(GO) test -v -race -coverprofile=../../coverage-gateway.out -covermode=atomic ./...
+	@cd services/data-ingestion && $(GO) test -v -race -coverprofile=../../coverage-ingestion.out -covermode=atomic ./...
+	@echo "$(GREEN)✓ Coverage reports: coverage-gateway.out, coverage-ingestion.out$(NC)"
 
 go-test-integration: ## Run Go integration tests
 	@echo "$(BLUE)→ Running integration tests...$(NC)"
-	@$(GO) test -v -race -tags=integration ./services/...
+	@cd services/protocol-gateway && $(GO) test -v -race -tags=integration ./...
+	@cd services/data-ingestion && $(GO) test -v -race -tags=integration ./...
 
 go-bench: ## Run Go benchmarks
 	@echo "$(BLUE)→ Running benchmarks...$(NC)"
-	@$(GO) test -bench=. -benchmem ./services/...
+	@cd services/protocol-gateway && $(GO) test -bench=. -benchmem ./...
+	@cd services/data-ingestion && $(GO) test -bench=. -benchmem ./...
 
 # ============================================
 # Linting & Formatting
@@ -136,7 +147,8 @@ lint: go-lint ## Run all linters
 
 go-lint: ## Run Go linter
 	@echo "$(BLUE)→ Running Go linter...$(NC)"
-	@$(GOLINT) run ./services/...
+	@cd services/protocol-gateway && $(GOLINT) run ./...
+	@cd services/data-ingestion && $(GOLINT) run ./...
 	@echo "$(GREEN)✓ Go linting passed$(NC)"
 
 go-fmt: ## Format Go code
@@ -146,11 +158,12 @@ go-fmt: ## Format Go code
 
 go-vet: ## Run go vet
 	@echo "$(BLUE)→ Running go vet...$(NC)"
-	@$(GOVET) ./services/...
+	@cd services/protocol-gateway && $(GOVET) ./...
+	@cd services/data-ingestion && $(GOVET) ./...
 	@echo "$(GREEN)✓ go vet passed$(NC)"
 
 fmt: go-fmt ## Format all code
-	@pnpm format 2>/dev/null || true
+	@command -v pnpm >/dev/null 2>&1 && pnpm format || npm run format 2>/dev/null || true
 	@echo "$(GREEN)✓ All code formatted$(NC)"
 
 # ============================================
@@ -161,12 +174,14 @@ security: go-security go-vuln ## Run all security checks
 
 go-security: ## Run gosec security scanner
 	@echo "$(BLUE)→ Running security scan...$(NC)"
-	@gosec -quiet ./services/...
+	@cd services/protocol-gateway && gosec -quiet ./...
+	@cd services/data-ingestion && gosec -quiet ./...
 	@echo "$(GREEN)✓ Security scan passed$(NC)"
 
 go-vuln: ## Check for known vulnerabilities
 	@echo "$(BLUE)→ Checking for vulnerabilities...$(NC)"
-	@govulncheck ./services/...
+	@cd services/protocol-gateway && govulncheck ./...
+	@cd services/data-ingestion && govulncheck ./...
 	@echo "$(GREEN)✓ Vulnerability check passed$(NC)"
 
 # ============================================
@@ -244,14 +259,14 @@ deps: ## Sync all dependencies
 	@$(GO) work sync
 	@cd services/protocol-gateway && $(GO) mod tidy
 	@cd services/data-ingestion && $(GO) mod tidy
-	@pnpm install
+	@if command -v pnpm >/dev/null 2>&1; then pnpm install; elif command -v npm >/dev/null 2>&1; then npm install; fi
 	@echo "$(GREEN)✓ Dependencies synced$(NC)"
 
 deps-update: ## Update all dependencies
 	@echo "$(BLUE)→ Updating dependencies...$(NC)"
 	@cd services/protocol-gateway && $(GO) get -u ./... && $(GO) mod tidy
 	@cd services/data-ingestion && $(GO) get -u ./... && $(GO) mod tidy
-	@pnpm update
+	@if command -v pnpm >/dev/null 2>&1; then pnpm update; elif command -v npm >/dev/null 2>&1; then npm update; fi
 	@echo "$(GREEN)✓ Dependencies updated$(NC)"
 
 deps-check: ## Check for outdated dependencies

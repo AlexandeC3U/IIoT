@@ -33,8 +33,9 @@ mqtt:
   # tls_ca_file: /path/to/ca.pem
 
 # Modbus Connection Pool
+# max_connections should be >= number of Modbus devices you plan to connect
 modbus:
-  max_connections: 100
+  max_connections: 500
   idle_timeout: 5m
   health_check_period: 30s
   connection_timeout: 10s
@@ -42,8 +43,10 @@ modbus:
   retry_delay: 100ms
 
 # OPC UA Connection Pool
+# max_connections should be >= number of OPC UA servers/endpoints you plan to connect
+# Note: One session per OPC UA server, not per tag
 opcua:
-  max_connections: 50
+  max_connections: 500
   idle_timeout: 5m
   health_check_period: 30s
   connection_timeout: 15s
@@ -54,8 +57,9 @@ opcua:
   default_auth_mode: Anonymous
 
 # S7 Connection Pool
+# max_connections should be >= number of S7 PLCs you plan to connect
 s7:
-  max_connections: 100
+  max_connections: 500
   idle_timeout: 5m
   health_check_period: 30s
   connection_timeout: 10s

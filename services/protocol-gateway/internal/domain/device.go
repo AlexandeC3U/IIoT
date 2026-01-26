@@ -51,6 +51,9 @@ type Device struct {
 	// PollInterval is the default polling interval for all tags (can be overridden per tag)
 	PollInterval time.Duration `json:"poll_interval" yaml:"poll_interval"`
 
+	// RateLimiting contains per-device rate limiting settings
+	RateLimiting RateLimitConfig `json:"rate_limiting,omitempty" yaml:"rate_limiting,omitempty"`
+
 	// Enabled indicates whether this device should be actively polled
 	Enabled bool `json:"enabled" yaml:"enabled"`
 
@@ -66,6 +69,31 @@ type Device struct {
 
 	// UpdatedAt is when this device configuration was last modified
 	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
+}
+
+// RateLimitConfig holds per-device rate limiting settings.
+// Rate limiting protects devices from being overwhelmed by requests.
+type RateLimitConfig struct {
+	// Enabled enables rate limiting for this device
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+
+	// MinInterval is the minimum time between consecutive operations to this device.
+	// If a poll is attempted before MinInterval has passed since the last operation,
+	// it will be delayed or skipped based on the SkipOnLimit setting.
+	MinInterval time.Duration `json:"min_interval,omitempty" yaml:"min_interval,omitempty"`
+
+	// MaxRequestsPerSecond limits the number of requests per second to this device.
+	// 0 means unlimited. This is an alternative to MinInterval.
+	MaxRequestsPerSecond float64 `json:"max_requests_per_second,omitempty" yaml:"max_requests_per_second,omitempty"`
+
+	// BurstSize is the maximum number of requests that can be made in a burst.
+	// Defaults to 1 if not specified.
+	BurstSize int `json:"burst_size,omitempty" yaml:"burst_size,omitempty"`
+
+	// SkipOnLimit determines behavior when rate limit is hit:
+	// true = skip the operation and log (recommended for polling)
+	// false = wait/delay until rate limit allows (blocks the worker)
+	SkipOnLimit bool `json:"skip_on_limit,omitempty" yaml:"skip_on_limit,omitempty"`
 }
 
 // ConnectionConfig holds protocol-specific connection parameters.

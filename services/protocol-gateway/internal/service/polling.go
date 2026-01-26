@@ -46,6 +46,7 @@ type PollingService struct {
 	wg              sync.WaitGroup
 	workerPool      chan struct{}
 	stats           *PollingStats
+	rateLimiters    *RateLimiterManager // Per-device rate limiters
 }
 
 // PollingConfig holds configuration for the polling service.
@@ -59,31 +60,34 @@ type PollingConfig struct {
 
 // PollingStats tracks polling statistics.
 type PollingStats struct {
-	TotalPolls      atomic.Uint64
-	SuccessPolls    atomic.Uint64
-	FailedPolls     atomic.Uint64
-	SkippedPolls    atomic.Uint64 // Polls skipped due to back-pressure
-	PointsRead      atomic.Uint64
-	PointsPublished atomic.Uint64
+	TotalPolls       atomic.Uint64
+	SuccessPolls     atomic.Uint64
+	FailedPolls      atomic.Uint64
+	SkippedPolls     atomic.Uint64 // Polls skipped due to back-pressure
+	RateLimitSkipped atomic.Uint64 // Polls skipped due to rate limiting
+	PointsRead       atomic.Uint64
+	PointsPublished  atomic.Uint64
 }
 
 // devicePoller manages polling for a single device.
 type devicePoller struct {
-	device    *domain.Device
-	stopChan  chan struct{}
-	running   atomic.Bool
-	lastPoll  time.Time
-	lastError error
-	stats     deviceStats
-	mu        sync.RWMutex
+	device      *domain.Device
+	rateLimiter *DeviceRateLimiter // Per-device rate limiter
+	stopChan    chan struct{}
+	running     atomic.Bool
+	lastPoll    time.Time
+	lastError   error
+	stats       deviceStats
+	mu          sync.RWMutex
 }
 
 // deviceStats tracks per-device statistics.
 type deviceStats struct {
-	pollCount    atomic.Uint64
-	errorCount   atomic.Uint64
-	skippedCount atomic.Uint64 // Back-pressure skips
-	pointsRead   atomic.Uint64
+	pollCount        atomic.Uint64
+	errorCount       atomic.Uint64
+	skippedCount     atomic.Uint64 // Back-pressure skips
+	rateLimitSkipped atomic.Uint64 // Rate limit skips
+	pointsRead       atomic.Uint64
 }
 
 // NewPollingService creates a new polling service.
@@ -117,6 +121,7 @@ func NewPollingService(
 		devices:         make(map[string]*devicePoller),
 		workerPool:      make(chan struct{}, config.WorkerCount),
 		stats:           &PollingStats{},
+		rateLimiters:    NewRateLimiterManager(),
 	}
 }
 
@@ -191,19 +196,36 @@ func (s *PollingService) RegisterDevice(ctx context.Context, device *domain.Devi
 		return nil
 	}
 
+	// Create rate limiter for this device
+	rateLimiter := s.rateLimiters.GetOrCreate(device.ID, device.RateLimiting)
+
 	dp := &devicePoller{
-		device:   device,
-		stopChan: make(chan struct{}),
+		device:      device,
+		rateLimiter: rateLimiter,
+		stopChan:    make(chan struct{}),
 	}
 
 	s.devices[device.ID] = dp
 
-	s.logger.Info().
-		Str("device_id", device.ID).
-		Str("device_name", device.Name).
-		Int("tags", len(device.Tags)).
-		Dur("poll_interval", device.PollInterval).
-		Msg("Registered device for polling")
+	// Log rate limiting status
+	if device.RateLimiting.Enabled {
+		s.logger.Info().
+			Str("device_id", device.ID).
+			Str("device_name", device.Name).
+			Int("tags", len(device.Tags)).
+			Dur("poll_interval", device.PollInterval).
+			Float64("max_rps", device.RateLimiting.MaxRequestsPerSecond).
+			Dur("min_interval", device.RateLimiting.MinInterval).
+			Bool("skip_on_limit", device.RateLimiting.SkipOnLimit).
+			Msg("Registered device for polling with rate limiting")
+	} else {
+		s.logger.Info().
+			Str("device_id", device.ID).
+			Str("device_name", device.Name).
+			Int("tags", len(device.Tags)).
+			Dur("poll_interval", device.PollInterval).
+			Msg("Registered device for polling")
+	}
 
 	// If service is already started, start polling this device
 	if s.started.Load() {
@@ -227,6 +249,9 @@ func (s *PollingService) UnregisterDevice(deviceID string) error {
 	if dp.running.Load() {
 		close(dp.stopChan)
 	}
+
+	// Clean up rate limiter
+	s.rateLimiters.Remove(deviceID)
 
 	delete(s.devices, deviceID)
 
@@ -282,7 +307,21 @@ func (s *PollingService) startDevicePoller(dp *devicePoller) {
 
 // pollDevice performs a single poll cycle for a device.
 // Implements back-pressure: skips poll if all workers are busy instead of blocking.
+// Also respects per-device rate limiting configuration.
 func (s *PollingService) pollDevice(dp *devicePoller) {
+	// Check rate limiter first (before acquiring worker to avoid holding worker while waiting)
+	if dp.rateLimiter != nil && dp.device.RateLimiting.Enabled {
+		if !dp.rateLimiter.Wait() {
+			// Rate limited and SkipOnLimit is true
+			s.stats.RateLimitSkipped.Add(1)
+			dp.stats.rateLimitSkipped.Add(1)
+			s.logger.Debug().
+				Str("device_id", dp.device.ID).
+				Msg("Poll skipped: rate limit exceeded")
+			return
+		}
+	}
+
 	// Try to acquire worker from pool (non-blocking with back-pressure)
 	select {
 	case s.workerPool <- struct{}{}:
@@ -348,11 +387,28 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 		dataPointPool.Put(goodPointsPtr)
 	}()
 
+	// Build tag lookup map for safe topic assignment
+	// This prevents bugs when adapters return results in different order than input tags
+	tagMap := make(map[string]*domain.Tag, len(tags))
+	for _, tag := range tags {
+		tagMap[tag.ID] = tag
+	}
+
 	// Set topics and filter good data points
-	for i, point := range dataPoints {
+	for _, point := range dataPoints {
 		if point != nil {
-			// Set the full topic
-			point.Topic = fmt.Sprintf("%s/%s", dp.device.UNSPrefix, tags[i].TopicSuffix)
+			// Look up tag by ID instead of assuming index correspondence
+			// This is critical because adapters may skip invalid tags or reorder results
+			if tag, ok := tagMap[point.TagID]; ok {
+				point.Topic = fmt.Sprintf("%s/%s", dp.device.UNSPrefix, tag.TopicSuffix)
+			} else {
+				// Tag not found - this shouldn't happen but log if it does
+				s.logger.Warn().
+					Str("device_id", dp.device.ID).
+					Str("tag_id", point.TagID).
+					Msg("DataPoint has unknown TagID, skipping topic assignment")
+				continue
+			}
 
 			if point.Quality == domain.QualityGood {
 				goodPoints = append(goodPoints, point)
@@ -449,22 +505,29 @@ type DeviceStatus struct {
 
 // StatsSnapshot holds a point-in-time snapshot of polling statistics.
 type StatsSnapshot struct {
-	TotalPolls      uint64
-	SuccessPolls    uint64
-	FailedPolls     uint64
-	SkippedPolls    uint64
-	PointsRead      uint64
-	PointsPublished uint64
+	TotalPolls       uint64
+	SuccessPolls     uint64
+	FailedPolls      uint64
+	SkippedPolls     uint64 // Back-pressure skips
+	RateLimitSkipped uint64 // Rate limit skips
+	PointsRead       uint64
+	PointsPublished  uint64
 }
 
 // Stats returns a snapshot of the polling service statistics.
 func (s *PollingService) Stats() StatsSnapshot {
 	return StatsSnapshot{
-		TotalPolls:      s.stats.TotalPolls.Load(),
-		SuccessPolls:    s.stats.SuccessPolls.Load(),
-		FailedPolls:     s.stats.FailedPolls.Load(),
-		SkippedPolls:    s.stats.SkippedPolls.Load(),
-		PointsRead:      s.stats.PointsRead.Load(),
-		PointsPublished: s.stats.PointsPublished.Load(),
+		TotalPolls:       s.stats.TotalPolls.Load(),
+		SuccessPolls:     s.stats.SuccessPolls.Load(),
+		FailedPolls:      s.stats.FailedPolls.Load(),
+		SkippedPolls:     s.stats.SkippedPolls.Load(),
+		RateLimitSkipped: s.stats.RateLimitSkipped.Load(),
+		PointsRead:       s.stats.PointsRead.Load(),
+		PointsPublished:  s.stats.PointsPublished.Load(),
 	}
+}
+
+// RateLimiterStats returns rate limiter statistics for all devices.
+func (s *PollingService) RateLimiterStats() map[string]RateLimiterStats {
+	return s.rateLimiters.AllStats()
 }

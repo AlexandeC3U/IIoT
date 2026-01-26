@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,13 @@ type Client struct {
 	deviceID    string
 	nodeCache   map[string]*ua.NodeID // Cache parsed node IDs
 	nodeCacheMu sync.RWMutex
+
+	// Session error tracking for extended backoff
+	// OPC UA servers have limited sessions; when we hit TooManySessions,
+	// we need to back off for minutes, not seconds
+	sessionErrorCount   atomic.Int32
+	sessionBackoffUntil time.Time
+	sessionBackoffMu    sync.RWMutex
 }
 
 // ClientConfig holds configuration for an OPC UA client.
@@ -79,14 +87,14 @@ type ClientConfig struct {
 
 // ClientStats tracks client performance metrics.
 type ClientStats struct {
-	ReadCount       atomic.Uint64
-	WriteCount      atomic.Uint64
-	ErrorCount      atomic.Uint64
-	RetryCount      atomic.Uint64
-	SubscribeCount  atomic.Uint64
+	ReadCount         atomic.Uint64
+	WriteCount        atomic.Uint64
+	ErrorCount        atomic.Uint64
+	RetryCount        atomic.Uint64
+	SubscribeCount    atomic.Uint64
 	NotificationCount atomic.Uint64
-	TotalReadTime   atomic.Int64 // nanoseconds
-	TotalWriteTime  atomic.Int64 // nanoseconds
+	TotalReadTime     atomic.Int64 // nanoseconds
+	TotalWriteTime    atomic.Int64 // nanoseconds
 }
 
 // NewClient creates a new OPC UA client with the given configuration.
@@ -253,11 +261,20 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 
 	var dp *domain.DataPoint
 
+	// Check if we're in session limit backoff before attempting operation
+	if shouldDelay, remaining := c.shouldDelayForSessionLimit(); shouldDelay {
+		c.logger.Debug().
+			Dur("remaining_backoff", remaining).
+			Str("tag", tag.ID).
+			Msg("Skipping read due to session limit backoff")
+		return c.createErrorDataPoint(tag, domain.ErrOPCUASessionLimit), domain.ErrOPCUASessionLimit
+	}
+
 	// Execute read with retry logic
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			c.stats.RetryCount.Add(1)
-			delay := c.calculateBackoff(attempt)
+			delay := c.calculateBackoff(attempt, err)
 			c.logger.Debug().
 				Int("attempt", attempt).
 				Dur("delay", delay).
@@ -272,7 +289,16 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 
 		dp, err = c.readNode(ctx, nodeID, tag)
 		if err == nil {
+			// Successful read - clear any session backoff state
+			c.clearSessionLimitBackoff()
 			break
+		}
+
+		// Check for session limit error - do NOT retry, enter extended backoff
+		if c.isSessionLimitError(err) {
+			c.recordSessionLimitError()
+			c.stats.ErrorCount.Add(1)
+			return c.createErrorDataPoint(tag, err), err
 		}
 
 		// Check if error is retryable
@@ -403,11 +429,20 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
 	}
 
+	// Check if we're in session limit backoff before attempting operation
+	if shouldDelay, remaining := c.shouldDelayForSessionLimit(); shouldDelay {
+		c.logger.Debug().
+			Dur("remaining_backoff", remaining).
+			Str("tag", tag.ID).
+			Msg("Skipping write due to session limit backoff")
+		return domain.ErrOPCUASessionLimit
+	}
+
 	// Execute write with retry logic
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			c.stats.RetryCount.Add(1)
-			delay := c.calculateBackoff(attempt)
+			delay := c.calculateBackoff(attempt, err)
 			c.logger.Debug().
 				Int("attempt", attempt).
 				Dur("delay", delay).
@@ -422,7 +457,16 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 
 		err = c.writeNode(ctx, nodeID, variant)
 		if err == nil {
+			// Successful write - clear any session backoff state
+			c.clearSessionLimitBackoff()
 			break
+		}
+
+		// Check for session limit error - do NOT retry, enter extended backoff
+		if c.isSessionLimitError(err) {
+			c.recordSessionLimitError()
+			c.stats.ErrorCount.Add(1)
+			return err
 		}
 
 		// Check if error is retryable
@@ -879,23 +923,57 @@ func (c *Client) createErrorDataPoint(tag *domain.Tag, err error) *domain.DataPo
 	)
 }
 
-// calculateBackoff calculates exponential backoff delay.
-func (c *Client) calculateBackoff(attempt int) time.Duration {
-	delay := c.config.RetryDelay * time.Duration(1<<uint(attempt))
-	maxDelay := 10 * time.Second
-	if delay > maxDelay {
-		delay = maxDelay
-	}
-	return delay
-}
+// OPC UA Status Codes for semantic error handling
+// Reference: https://reference.opcfoundation.org/Core/Part4/v105/docs/A.2
+const (
+	// StatusBadTooManySessions indicates the server has reached its maximum number of sessions
+	StatusBadTooManySessions uint32 = 0x80560000
+	// StatusBadSessionClosed indicates the session was closed by the server
+	StatusBadSessionClosed uint32 = 0x80260000
+	// StatusBadSessionIdInvalid indicates the session id is not valid
+	StatusBadSessionIdInvalid uint32 = 0x80250000
+	// StatusBadSecureChannelClosed indicates the secure channel has been closed
+	StatusBadSecureChannelClosed uint32 = 0x80860000
+	// StatusBadServerNotConnected indicates the operation failed because the server is not connected
+	StatusBadServerNotConnected uint32 = 0x800D0000
+)
 
-// isRetryableError determines if an error is transient and worth retrying.
-func (c *Client) isRetryableError(err error) bool {
+// Extended backoff durations for OPC UA semantic errors
+const (
+	// SessionLimitBackoff is the backoff duration when server reports TooManySessions
+	// This should be long enough for server sessions to timeout (typically minutes)
+	SessionLimitBackoff = 5 * time.Minute
+
+	// StandardMaxBackoff is the maximum backoff for standard errors
+	StandardMaxBackoff = 60 * time.Second
+)
+
+// isSessionLimitError checks if the error indicates the server has too many sessions.
+// This is a critical error that requires extended backoff - aggressive retries will DoS the server.
+func (c *Client) isSessionLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Retry on timeouts and connection errors
-	return c.isConnectionError(err)
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "toomanysessions") ||
+		strings.Contains(errStr, "0x80560000") ||
+		strings.Contains(errStr, "maximum number of sessions")
+}
+
+// isSessionError checks if the error is related to session state.
+// These errors may require session recreation but not extended backoff.
+func (c *Client) isSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "sessionclosed") ||
+		strings.Contains(errStr, "sessionidinvalid") ||
+		strings.Contains(errStr, "securechannelclosed") ||
+		strings.Contains(errStr, "session") ||
+		strings.Contains(errStr, "0x80260000") ||
+		strings.Contains(errStr, "0x80250000") ||
+		strings.Contains(errStr, "0x80860000")
 }
 
 // isConnectionError checks if the error is a connection-related error.
@@ -903,35 +981,151 @@ func (c *Client) isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Check for common connection error patterns
-	errStr := err.Error()
-	return contains(errStr, "connection") ||
-		contains(errStr, "timeout") ||
-		contains(errStr, "closed") ||
-		contains(errStr, "refused") ||
-		contains(errStr, "reset")
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "closed") ||
+		strings.Contains(errStr, "refused") ||
+		strings.Contains(errStr, "reset") ||
+		strings.Contains(errStr, "eof")
 }
 
-// reconnect attempts to re-establish the connection.
+// isRetryableError determines if an error is transient and worth retrying.
+// OPC UA has semantic errors that require different handling.
+func (c *Client) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Session limit errors should NOT trigger immediate retry
+	// The caller should check isSessionLimitError separately and apply extended backoff
+	if c.isSessionLimitError(err) {
+		return false
+	}
+
+	// Session and connection errors are retryable after appropriate delay
+	return c.isSessionError(err) || c.isConnectionError(err)
+}
+
+// calculateBackoff calculates backoff delay based on error type and attempt number.
+// OPC UA semantic errors like TooManySessions require extended backoff.
+func (c *Client) calculateBackoff(attempt int, err error) time.Duration {
+	// Session limit errors require extended backoff
+	if c.isSessionLimitError(err) {
+		c.recordSessionLimitError()
+		return SessionLimitBackoff
+	}
+
+	// Standard exponential backoff for other errors
+	delay := c.config.RetryDelay * time.Duration(1<<uint(attempt))
+	if delay > StandardMaxBackoff {
+		delay = StandardMaxBackoff
+	}
+	return delay
+}
+
+// recordSessionLimitError records that a session limit error occurred and sets backoff state.
+func (c *Client) recordSessionLimitError() {
+	c.sessionBackoffMu.Lock()
+	defer c.sessionBackoffMu.Unlock()
+
+	c.sessionErrorCount.Add(1)
+	c.sessionBackoffUntil = time.Now().Add(SessionLimitBackoff)
+
+	c.logger.Warn().
+		Time("backoff_until", c.sessionBackoffUntil).
+		Int32("session_error_count", c.sessionErrorCount.Load()).
+		Msg("OPC UA server at session limit, entering extended backoff")
+}
+
+// shouldDelayForSessionLimit checks if we should delay due to recent session limit errors.
+// Returns true and the remaining wait duration if we're in backoff period.
+func (c *Client) shouldDelayForSessionLimit() (bool, time.Duration) {
+	c.sessionBackoffMu.RLock()
+	defer c.sessionBackoffMu.RUnlock()
+
+	if time.Now().Before(c.sessionBackoffUntil) {
+		remaining := time.Until(c.sessionBackoffUntil)
+		return true, remaining
+	}
+	return false, 0
+}
+
+// clearSessionLimitBackoff clears the session limit backoff state after successful connection.
+func (c *Client) clearSessionLimitBackoff() {
+	c.sessionBackoffMu.Lock()
+	defer c.sessionBackoffMu.Unlock()
+
+	if !c.sessionBackoffUntil.IsZero() {
+		c.logger.Info().
+			Int32("previous_error_count", c.sessionErrorCount.Load()).
+			Msg("Cleared session limit backoff after successful connection")
+	}
+	c.sessionBackoffUntil = time.Time{}
+}
+
+// reconnect attempts to re-establish the connection with session limit awareness.
 func (c *Client) reconnect(ctx context.Context) {
+	// Check if we're in session limit backoff
+	if shouldDelay, remaining := c.shouldDelayForSessionLimit(); shouldDelay {
+		c.logger.Debug().
+			Dur("remaining_backoff", remaining).
+			Msg("Skipping reconnect due to session limit backoff")
+		return
+	}
+
 	c.Disconnect()
 	if err := c.Connect(ctx); err != nil {
+		// Check if this was a session limit error and record it
+		if c.isSessionLimitError(err) {
+			c.recordSessionLimitError()
+		}
 		c.logger.Error().Err(err).Msg("Failed to reconnect")
+	} else {
+		// Successful connection - clear backoff state
+		c.clearSessionLimitBackoff()
 	}
 }
 
 // GetStats returns the client statistics as a map.
 func (c *Client) GetStats() map[string]uint64 {
 	return map[string]uint64{
-		"read_count":         c.stats.ReadCount.Load(),
-		"write_count":        c.stats.WriteCount.Load(),
-		"error_count":        c.stats.ErrorCount.Load(),
-		"retry_count":        c.stats.RetryCount.Load(),
-		"subscribe_count":    c.stats.SubscribeCount.Load(),
-		"notification_count": c.stats.NotificationCount.Load(),
-		"total_read_ns":      uint64(c.stats.TotalReadTime.Load()),
-		"total_write_ns":     uint64(c.stats.TotalWriteTime.Load()),
+		"read_count":           c.stats.ReadCount.Load(),
+		"write_count":          c.stats.WriteCount.Load(),
+		"error_count":          c.stats.ErrorCount.Load(),
+		"retry_count":          c.stats.RetryCount.Load(),
+		"subscribe_count":      c.stats.SubscribeCount.Load(),
+		"notification_count":   c.stats.NotificationCount.Load(),
+		"total_read_ns":        uint64(c.stats.TotalReadTime.Load()),
+		"total_write_ns":       uint64(c.stats.TotalWriteTime.Load()),
+		"session_limit_errors": uint64(c.sessionErrorCount.Load()),
 	}
+}
+
+// SessionBackoffState represents the current session limit backoff state.
+type SessionBackoffState struct {
+	InBackoff     bool
+	BackoffUntil  time.Time
+	RemainingTime time.Duration
+	ErrorCount    int32
+}
+
+// GetSessionBackoffState returns the current session limit backoff state for observability.
+func (c *Client) GetSessionBackoffState() SessionBackoffState {
+	c.sessionBackoffMu.RLock()
+	defer c.sessionBackoffMu.RUnlock()
+
+	state := SessionBackoffState{
+		BackoffUntil: c.sessionBackoffUntil,
+		ErrorCount:   c.sessionErrorCount.Load(),
+	}
+
+	if !c.sessionBackoffUntil.IsZero() && time.Now().Before(c.sessionBackoffUntil) {
+		state.InBackoff = true
+		state.RemainingTime = time.Until(c.sessionBackoffUntil)
+	}
+
+	return state
 }
 
 // LastUsed returns when the client was last used.
@@ -1071,6 +1265,7 @@ func toFloat64(v interface{}) (float64, bool) {
 }
 
 // Unused imports guard - will be removed by compiler if not needed
-var _ = binary.BigEndian
-var _ = math.Float32frombits
-
+var (
+	_ = binary.BigEndian
+	_ = math.Float32frombits
+)
