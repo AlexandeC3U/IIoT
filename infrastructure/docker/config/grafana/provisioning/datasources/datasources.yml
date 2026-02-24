@@ -1,0 +1,50 @@
+# Grafana Datasource Provisioning
+# Auto-configured when Grafana starts
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Metrics
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: "2.48.0"
+
+  # TimescaleDB - Time-series data
+  - name: TimescaleDB
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    database: nexus_historian
+    user: nexus_user
+    secureJsonData:
+      password: nexus_password
+    editable: false
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 5
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: true
+
+  # PostgreSQL - Configuration data
+  - name: PostgreSQL
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: nexus_gateway
+    user: nexus_user
+    secureJsonData:
+      password: nexus_password
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1500

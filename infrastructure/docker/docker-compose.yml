@@ -18,9 +18,10 @@ volumes:
   emqx-log:
   timescale-data:
   postgres-data:
-  nodered-data:
   grafana-data:
   gateway-logs:
+  protocol-gateway-pki:
+  prometheus-data:
 
 services:
   # ═══════════════════════════════════════════════════════════════════════════
@@ -49,7 +50,7 @@ services:
       - EMQX_LISTENERS__TCP__DEFAULT__MAX_CONNECTIONS=100000
       - EMQX_MQTT__MAX_TOPIC_LEVELS=10
     ports:
-      - "1883:1883"      # MQTT TCP
+      - "1884:1883"      # MQTT TCP
       - "8883:8883"      # MQTT SSL
       - "8083:8083"      # MQTT WebSocket
       - "8084:8084"      # MQTT WebSocket SSL
@@ -189,9 +190,9 @@ services:
       retries: 3
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Protocol Gateway (Go)
+  # Protocol Gateway V2 (Go)
   # Industrial protocol conversion (S7, OPC UA, Modbus → MQTT)
-  # High-performance Go service using gos7, gopcua, go-modbus libraries
+  # Features: REST API, OPC UA subscriptions/browse, PKI trust store, NTP drift
   # ─────────────────────────────────────────────────────────────────────────────
   protocol-gateway:
     build:
@@ -202,80 +203,42 @@ services:
     hostname: protocol-gateway
     restart: unless-stopped
     environment:
-      - NEXUS_ENV=${NEXUS_ENV:-production}
-      - NEXUS_PORT=4000
-      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
+      # General
+      - ENVIRONMENT=${NEXUS_ENV:-production}
+      - DEVICES_CONFIG_PATH=/app/config/devices.yaml
+      # HTTP Server (unified port for API, health, metrics)
+      - HTTP_PORT=8080
       # MQTT connection
-      - NEXUS_MQTT_BROKER=tcp://emqx:1883
-      - NEXUS_MQTT_USERNAME=${MQTT_PROTOCOL_USER:-protocol-gateway}
-      - NEXUS_MQTT_PASSWORD=${MQTT_PROTOCOL_PASS:-protocol_secret}
-      - NEXUS_MQTT_CLIENT_ID=protocol-gateway-1
-      # Database for device configs
-      - NEXUS_DB_HOST=postgres
-      - NEXUS_DB_PORT=5432
-      - NEXUS_DB_USER=${POSTGRES_USER:-nexus}
-      - NEXUS_DB_PASSWORD=${POSTGRES_PASSWORD:-nexus_config_secret}
-      - NEXUS_DB_NAME=${POSTGRES_DB:-nexus_config}
-      # Default polling interval
-      - NEXUS_POLL_INTERVAL_MS=1000
-      # Enable protocols
-      - NEXUS_S7_ENABLED=true
-      - NEXUS_OPCUA_ENABLED=true
-      - NEXUS_MODBUS_ENABLED=true
+      - MQTT_BROKER_URL=tcp://emqx:1883
+      - MQTT_CLIENT_ID=protocol-gateway-1
+      - MQTT_USERNAME=${MQTT_PROTOCOL_USER:-}
+      - MQTT_PASSWORD=${MQTT_PROTOCOL_PASS:-}
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=json
+      # API Security (enable in production)
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-false}
+      - API_KEY=${API_KEY:-}
       # Go runtime tuning
       - GOMAXPROCS=4
       - GOGC=100
     ports:
-      - "4000:4000"
+      - "8085:8080"    # API, health, metrics (avoid conflict with web-ui:8080)
+    volumes:
+      # Device configuration (can also use ConfigMap in K8s)
+      - ../../services/protocol-gateway/config/devices.yaml:/app/config/devices.yaml:ro
+      # PKI trust store for OPC UA certificates (persistent)
+      - protocol-gateway-pki:/app/certs/pki
+      # Optional: Docker socket for container log access in Web UI
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - nexus-internal
       - nexus-ot  # Access to OT network for PLC communication
     depends_on:
-      postgres:
-        condition: service_healthy
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "/app/protocol-gateway", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Flow Engine (Node-RED based)
-  # Flow-based processing and automation
-  # ─────────────────────────────────────────────────────────────────────────────
-  flow-engine:
-    build:
-      context: ../../services/flow-engine
-      dockerfile: Dockerfile
-    image: nexus/flow-engine:${VERSION:-latest}
-    container_name: nexus-flow-engine
-    hostname: flow-engine
-    restart: unless-stopped
-    environment:
-      - NODE_RED_ENABLE_PROJECTS=true
-      - NODE_RED_CREDENTIAL_SECRET=${NODERED_CREDENTIAL_SECRET:-your-node-red-secret}
-      # MQTT connection
-      - MQTT_URL=mqtt://emqx:1883
-      - MQTT_USERNAME=${MQTT_FLOW_USER:-flow-engine}
-      - MQTT_PASSWORD=${MQTT_FLOW_PASS:-flow_secret}
-      # Historian connection
-      - HISTORIAN_URL=postgresql://${HISTORIAN_USER:-nexus}:${HISTORIAN_PASSWORD:-nexus_historian_secret}@historian:5432/${HISTORIAN_DB:-nexus_historian}
-    ports:
-      - "1880:1880"
-    volumes:
-      - nodered-data:/data
-      - ./config/nodered/settings.js:/data/settings.js:ro
-    networks:
-      - nexus-internal
-    depends_on:
-      emqx:
-        condition: service_healthy
-      timescaledb:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:1880/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -321,94 +284,6 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Orchestrator Service (Go)
-  # Container and Kubernetes management using client-go/docker SDK
-  # ─────────────────────────────────────────────────────────────────────────────
-  orchestrator:
-    build:
-      context: ../../services/orchestrator-service
-      dockerfile: Dockerfile
-    image: nexus/orchestrator:${VERSION:-latest}
-    container_name: nexus-orchestrator
-    hostname: orchestrator
-    restart: unless-stopped
-    environment:
-      - NEXUS_ENV=${NEXUS_ENV:-production}
-      - NEXUS_PORT=5000
-      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
-      # Container runtime
-      - NEXUS_RUNTIME=docker  # or 'kubernetes'
-      # Docker socket (for Docker mode)
-      - DOCKER_HOST=unix:///var/run/docker.sock
-      # Kubernetes config (for K8s mode)
-      # - KUBECONFIG=/etc/kubernetes/admin.conf
-      # Go runtime tuning
-      - GOMAXPROCS=2
-    ports:
-      - "5000:5000"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # For Kubernetes mode:
-      # - /etc/kubernetes/admin.conf:/etc/kubernetes/admin.conf:ro
-    networks:
-      - nexus-internal
-    healthcheck:
-      test: ["CMD", "/app/orchestrator", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Alert Service (Go)
-  # Real-time rule evaluation and notifications
-  # ─────────────────────────────────────────────────────────────────────────────
-  alert-service:
-    build:
-      context: ../../services/alert-service
-      dockerfile: Dockerfile
-    image: nexus/alert-service:${VERSION:-latest}
-    container_name: nexus-alert-service
-    hostname: alert-service
-    restart: unless-stopped
-    environment:
-      - NEXUS_ENV=${NEXUS_ENV:-production}
-      - NEXUS_PORT=6000
-      - NEXUS_LOG_LEVEL=${LOG_LEVEL:-info}
-      # MQTT connection
-      - NEXUS_MQTT_BROKER=tcp://emqx:1883
-      - NEXUS_MQTT_USERNAME=${MQTT_ALERT_USER:-alerts}
-      - NEXUS_MQTT_PASSWORD=${MQTT_ALERT_PASS:-alert_secret}
-      - NEXUS_MQTT_CLIENT_ID=alert-service-1
-      # Database for alert rules and history
-      - NEXUS_DB_HOST=postgres
-      - NEXUS_DB_PORT=5432
-      - NEXUS_DB_USER=${POSTGRES_USER:-nexus}
-      - NEXUS_DB_PASSWORD=${POSTGRES_PASSWORD:-nexus_config_secret}
-      - NEXUS_DB_NAME=${POSTGRES_DB:-nexus_config}
-      # Notification channels (configure as needed)
-      - NEXUS_SMTP_HOST=${SMTP_HOST:-}
-      - NEXUS_SMTP_PORT=${SMTP_PORT:-587}
-      - NEXUS_SMTP_USER=${SMTP_USER:-}
-      - NEXUS_SMTP_PASS=${SMTP_PASS:-}
-      - NEXUS_SMTP_FROM=${SMTP_FROM:-alerts@nexus.local}
-      # Go runtime tuning
-      - GOMAXPROCS=2
-    ports:
-      - "6000:6000"
-    networks:
-      - nexus-internal
-    depends_on:
-      postgres:
-        condition: service_healthy
-      emqx:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -466,18 +341,52 @@ services:
       - web-ui
       - gateway-core
 
-  # ═══════════════════════════════════════════════════════════════════════════
-  # OPTIONAL: GRAFANA (for advanced visualization)
-  # Can be used alongside or instead of native dashboards
-  # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# MONITORING (Prometheus + Grafana)
+# Start with: docker-compose --profile monitoring up
+# ═══════════════════════════════════════════════════════════════════════════
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Prometheus - Metrics Collection
+  # Scrapes metrics from all services (protocol-gateway, data-ingestion, EMQX)
+  # ─────────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: nexus-prometheus
+    hostname: prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring  # Only start with: docker-compose --profile monitoring up
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - nexus-internal
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Grafana - Metrics Visualization
+  # Pre-configured with Prometheus datasource
+  # ─────────────────────────────────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.2.2
     container_name: nexus-grafana
     hostname: grafana
     restart: unless-stopped
     profiles:
-      - grafana  # Only start with: docker-compose --profile grafana up
+      - monitoring  # Only start with: docker-compose --profile monitoring up
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
@@ -491,11 +400,35 @@ services:
       - "3000:3000"
     volumes:
       - grafana-data:/var/lib/grafana
+      # Use local provisioning config (has Prometheus + TimescaleDB + PostgreSQL datasources)
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Reuse dashboard JSON files from protocol-gateway service
+      - ../../services/protocol-gateway/config/grafana/provisioning/dashboards/json:/var/lib/grafana/dashboards:ro
     networks:
       - nexus-internal
     depends_on:
+      prometheus:
+        condition: service_healthy
       timescaledb:
         condition: service_healthy
 
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPC UA Simulator for testing
+  # ─────────────────────────────────────────────────────────────────────────────
+  opcua-simulator:
+    build:
+      context: ../../services/protocol-gateway/tools/opcua-simulator
+      dockerfile: Dockerfile
+    container_name: nexus-opcua-sim
+    profiles:
+      - testing  # Only start with: docker-compose --profile testing up
+    ports:
+      - "4840:4840"
+    environment:
+      - OPCUA_HOST=0.0.0.0
+      - OPCUA_PORT=4840
+      - OPCUA_AUTO_UPDATE=1
+      - OPCUA_UPDATE_MS=500
+    networks:
+      - nexus-internal

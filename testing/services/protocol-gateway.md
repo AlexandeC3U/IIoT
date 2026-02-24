@@ -1,6 +1,8 @@
-# Protocol Gateway Testing Guide
+# Protocol Gateway V2 Testing Guide
 
-This document provides a comprehensive guide for testing the Protocol Gateway service, including startup instructions, deployment information, and detailed testing procedures.
+This document provides a comprehensive guide for testing the Protocol Gateway V2 service, including startup instructions, deployment information, and detailed testing procedures.
+
+> **Note:** Protocol Gateway V2 includes enhanced features: OPC UA subscriptions, address space browse, PKI trust store management, and NTP clock drift detection.
 
 ---
 
@@ -18,26 +20,28 @@ This document provides a comprehensive guide for testing the Protocol Gateway se
 
 ### Option A: Docker Compose (Recommended for First Test)
 
-This is the **easiest** way - it starts everything you need (EMQX broker + Modbus simulator + Gateway):
+This is the **easiest** way - it starts everything you need (EMQX broker + OPC UA simulator + Gateway + Prometheus + Grafana):
 
 ```powershell
 # Navigate to the protocol-gateway folder
 cd services/protocol-gateway
 
 # Start the development environment
-docker-compose -f docker-compose.dev.yaml up -d
+docker-compose up -d
 
 # View logs (watch what's happening)
-docker-compose -f docker-compose.dev.yaml logs -f
+docker-compose logs -f
 ```
 
 **What gets started:**
 
 | Container | Port | Purpose |
 |-----------|------|---------|
-| `nexus-emqx-dev` | 1883, 18083 | MQTT Broker (Dashboard: http://localhost:18083) |
-| `nexus-modbus-sim` | 5020 | Modbus Simulator |
-| `nexus-protocol-gateway-dev` | 8080 | Your Gateway |
+| `protocol-gateway-emqx` | 1884, 18083 | MQTT Broker (Dashboard: http://localhost:18083) |
+| `nexus-opcua-sim` | 4840 | OPC UA Simulator |
+| `protocol-gateway` | 8080 | Protocol Gateway (API, health, metrics) |
+| `protocol-gateway-prometheus` | 9090 | Prometheus (metrics collection) |
+| `protocol-gateway-grafana` | 3000 | Grafana (dashboards) |
 
 ### Option B: Run Locally (Native Go)
 
@@ -267,20 +271,29 @@ Test writing values back to the Modbus simulator using EMQX Dashboard WebSocket 
 cd services/protocol-gateway
 
 # Start everything
-docker-compose -f docker-compose.dev.yaml up -d
+docker-compose up -d
 
 # Watch logs (Ctrl+C to exit)
-docker-compose -f docker-compose.dev.yaml logs -f
+docker-compose logs -f
 
 # Check health
 Invoke-RestMethod http://localhost:8080/health
 
+# View API (device management, browse, etc.)
+# Open http://localhost:8080/api/devices
+
+# View metrics
+# Open http://localhost:8080/metrics
+
+# View Grafana dashboards
+# Open http://localhost:3000 (admin/admin)
+
 # View EMQX dashboard & MQTT messages
-# Open http://localhost:18083 (admin/admin123)
-# Go to: Diagnose → WebSocket Client → Connect → Subscribe to dev/#
+# Open http://localhost:18083 (admin/public)
+# Go to: Diagnose → WebSocket Client → Connect → Subscribe to uns/#
 
 # Stop everything
-docker-compose -f docker-compose.dev.yaml down
+docker-compose down
 ```
 
 ---

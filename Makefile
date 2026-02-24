@@ -14,7 +14,7 @@
 .PHONY: all install build test lint clean docker-build docker-up docker-down help
 .PHONY: go-build go-test go-lint go-fmt go-vet go-security go-vuln
 .PHONY: frontend-build frontend-test frontend-lint
-.PHONY: proto-gateway data-ingestion
+.PHONY: proto-gateway data-ingestion dev-with-monitoring
 
 # ============================================
 # Variables
@@ -236,10 +236,36 @@ dev: docker-up ## Start full development environment
 	@echo "$(GREEN)✓ Development environment ready!$(NC)"
 	@echo ""
 	@echo "Services:"
+	@echo "  - Web UI:            http://localhost:8080"
+	@echo "  - Gateway Core API:  http://localhost:3001"
+	@echo "  - Protocol Gateway:  http://localhost:8085 (API, health, metrics)"
+	@echo "  - Data Ingestion:    http://localhost:7000"
 	@echo "  - EMQX Dashboard:    http://localhost:18083 (admin/public)"
 	@echo "  - TimescaleDB:       localhost:5432"
-	@echo "  - Protocol Gateway:  http://localhost:8080"
-	@echo "  - Data Ingestion:    http://localhost:8081"
+	@echo "  - PostgreSQL:        localhost:5433"
+	@echo ""
+	@echo "Commands:"
+	@echo "  make docker-logs            - View logs"
+	@echo "  make docker-down            - Stop services"
+	@echo "  make dev-with-monitoring    - Start with Prometheus + Grafana"
+
+dev-with-monitoring: ## Start development with Prometheus and Grafana
+	@echo "$(BLUE)→ Starting development environment with monitoring...$(NC)"
+	@cd infrastructure/docker && docker-compose --profile monitoring up -d
+	@echo "$(GREEN)✓ Development environment with monitoring ready!$(NC)"
+	@echo ""
+	@echo "Services:"
+	@echo "  - Web UI:            http://localhost:8080"
+	@echo "  - Gateway Core API:  http://localhost:3001"
+	@echo "  - Protocol Gateway:  http://localhost:8085 (API, health, metrics)"
+	@echo "  - Data Ingestion:    http://localhost:7000"
+	@echo "  - EMQX Dashboard:    http://localhost:18083 (admin/public)"
+	@echo "  - TimescaleDB:       localhost:5432"
+	@echo "  - PostgreSQL:        localhost:5433"
+	@echo ""
+	@echo "Monitoring:"
+	@echo "  - Prometheus:        http://localhost:9090"
+	@echo "  - Grafana:           http://localhost:3000 (admin/admin)"
 	@echo ""
 	@echo "Commands:"
 	@echo "  make docker-logs  - View logs"

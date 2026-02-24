@@ -1,0 +1,76 @@
+# Prometheus configuration for Nexus Platform
+# Scrapes metrics from all services in the docker-compose stack
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+  external_labels:
+    monitor: 'nexus-platform'
+    environment: 'development'
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # Protocol Gateway metrics (Go service)
+  - job_name: 'protocol-gateway'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['protocol-gateway:8080']
+        labels:
+          service: 'protocol-gateway'
+          component: 'ot-integration'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'protocol-gateway'
+
+  # Data Ingestion metrics (Go service)
+  - job_name: 'data-ingestion'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['data-ingestion:8080']
+        labels:
+          service: 'data-ingestion'
+          component: 'storage'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'data-ingestion'
+
+  # Gateway Core metrics (Node.js service - if metrics endpoint exists)
+  # Uncomment when metrics are implemented
+  # - job_name: 'gateway-core'
+  #   metrics_path: '/metrics'
+  #   static_configs:
+  #     - targets: ['gateway-core:3001']
+  #       labels:
+  #         service: 'gateway-core'
+  #         component: 'api'
+
+  # EMQX MQTT Broker metrics
+  - job_name: 'emqx'
+    metrics_path: '/api/v5/prometheus/stats'
+    static_configs:
+      - targets: ['emqx:18083']
+        labels:
+          service: 'emqx'
+          component: 'mqtt-broker'
+    basic_auth:
+      username: 'admin'
+      password: 'public'
+
+  # TimescaleDB/PostgreSQL metrics (via postgres_exporter if deployed)
+  # Uncomment when postgres_exporter is added
+  # - job_name: 'timescaledb'
+  #   static_configs:
+  #     - targets: ['postgres-exporter:9187']
+  #       labels:
+  #         service: 'timescaledb'
+  #         component: 'database'

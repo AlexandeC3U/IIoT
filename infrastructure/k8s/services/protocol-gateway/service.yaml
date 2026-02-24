@@ -1,4 +1,5 @@
-# Protocol Gateway - Kubernetes Service
+# Protocol Gateway V2 - Kubernetes Service
+# All endpoints (API, health, metrics) are served on single port 8080
 apiVersion: v1
 kind: Service
 metadata:
@@ -17,13 +18,9 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
-    - name: health
-      port: 8081
-      targetPort: health
-      protocol: TCP
 
 ---
-# Headless service for direct pod access (useful for debugging)
+# Headless service for StatefulSet DNS (required for stable network identity)
 apiVersion: v1
 kind: Service
 metadata:

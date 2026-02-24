@@ -269,30 +269,62 @@
 <span class="comment"># Start all services</span>
 <span class="command">docker-compose up -d</span>
 
+<span class="comment"># Start with monitoring (Prometheus + Grafana)</span>
+<span class="command">docker-compose --profile monitoring up -d</span>
+
 <span class="comment"># View logs</span>
 <span class="command">docker-compose logs -f</span></code></pre>
 
           <h4 style="margin-top: 1rem">Services Started:</h4>
           <table>
             <tr>
+              <td>Web UI</td>
+              <td><a href="http://localhost:8080">localhost:8080</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>Gateway Core API</td>
+              <td><a href="http://localhost:3001">localhost:3001</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>Protocol Gateway</td>
+              <td><a href="http://localhost:8085">localhost:8085</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>Data Ingestion</td>
+              <td><a href="http://localhost:7000">localhost:7000</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
               <td>EMQX Dashboard</td>
               <td><a href="http://localhost:18083">localhost:18083</a></td>
               <td>admin / public</td>
             </tr>
             <tr>
-              <td>Protocol Gateway</td>
-              <td><a href="http://localhost:8080">localhost:8080</a></td>
-              <td>-</td>
-            </tr>
-            <tr>
-              <td>Data Ingestion</td>
-              <td><a href="http://localhost:8081">localhost:8081</a></td>
-              <td>-</td>
-            </tr>
-            <tr>
               <td>TimescaleDB</td>
               <td>localhost:5432</td>
-              <td>postgres / postgres</td>
+              <td>nexus / nexus_historian_secret</td>
+            </tr>
+            <tr>
+              <td>PostgreSQL (Config)</td>
+              <td>localhost:5433</td>
+              <td>nexus / nexus_config_secret</td>
+            </tr>
+          </table>
+
+          <h4 style="margin-top: 1rem">With --profile monitoring:</h4>
+          <table>
+            <tr>
+              <td>Prometheus</td>
+              <td><a href="http://localhost:9090">localhost:9090</a></td>
+              <td>-</td>
+            </tr>
+            <tr>
+              <td>Grafana</td>
+              <td><a href="http://localhost:3000">localhost:3000</a></td>
+              <td>admin / admin</td>
             </tr>
           </table>
         </div>
@@ -378,16 +410,28 @@ timescaledb         Up (healthy)</code></pre>
         <h3><span class="step-number">5</span>Access Dashboards</h3>
         <ul>
           <li>
-            <strong>EMQX Dashboard:</strong>
-            <a href="http://localhost:18083">http://localhost:18083</a> (admin / public)
+            <strong>Web UI:</strong>
+            <a href="http://localhost:8080">http://localhost:8080</a>
           </li>
           <li>
-            <strong>Protocol Gateway Health:</strong>
-            <a href="http://localhost:8080/health">http://localhost:8080/health</a>
+            <strong>Gateway Core API:</strong>
+            <a href="http://localhost:3001/health">http://localhost:3001/health</a>
+          </li>
+          <li>
+            <strong>Protocol Gateway API:</strong>
+            <a href="http://localhost:8085/health">http://localhost:8085/health</a>
+          </li>
+          <li>
+            <strong>Protocol Gateway Metrics:</strong>
+            <a href="http://localhost:8085/metrics">http://localhost:8085/metrics</a>
           </li>
           <li>
             <strong>Data Ingestion Health:</strong>
-            <a href="http://localhost:8081/health">http://localhost:8081/health</a>
+            <a href="http://localhost:7000/health">http://localhost:7000/health</a>
+          </li>
+          <li>
+            <strong>EMQX Dashboard:</strong>
+            <a href="http://localhost:18083">http://localhost:18083</a> (admin / public)
           </li>
         </ul>
       </div>
@@ -496,6 +540,7 @@ timescaledb         Up (healthy)</code></pre>
         <ul>
           <li><a href="./README.md">README.md</a> - Full project documentation</li>
           <li><a href="./ROADMAP.md">ROADMAP.md</a> - Development roadmap and progress</li>
+          <li><a href="./docs/PLATFORM_ARCHITECTURE.md">Platform Architecture</a> - Complete system architecture diagram</li>
           <li><a href="./docs/ARCHITECTURE.md">Architecture Guide</a> - System design details</li>
           <li>
             <a href="./infrastructure/k8s/README.md">Kubernetes Guide</a> - K8s deployment

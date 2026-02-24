@@ -32,7 +32,7 @@ Last verified against codebase: **2026-02-23**
 ---
 
 
-### 14. Native MQTT Device Support (MQTT → MQTT) - planned for V2 
+### 14. Native MQTT Device Support (MQTT → MQTT) - planned for V2
 
 **Status**: Partial foundation exists, but end-to-end ingestion is **not implemented**.
 
@@ -503,11 +503,11 @@ protocol-gateway ──► devices.yaml (local file)
 │      │                                                                      │
 │      ▼                                                                      │
 │  gateway-core (Node.js)                protocol-gateway (Go)                │
-│  ├── REST API                          ├── Startup: GET /devices from core │
-│  ├── PostgreSQL storage ◄──────────────┤── Runtime: webhook for changes    │
-│  ├── Device/Tag CRUD                   ├── Polls industrial devices        │
-│  └── Single source of truth            ├── OPC UA browse (local, no sync)  │
-│           │                            └── Publishes to MQTT               │
+│  ├── REST API                          ├── Startup: GET /devices from core  │
+│  ├── PostgreSQL storage ◄──────────────┤── Runtime: webhook for changes     │
+│  ├── Device/Tag CRUD                   ├── Polls industrial devices         │
+│  └── Single source of truth            ├── OPC UA browse (local, no sync)   │
+│           │                            └── Publishes to MQTT                │
 │           ▼                                                                 │
 │       PostgreSQL                                                            │
 │                                                                             │
@@ -569,9 +569,9 @@ if cfg.ConfigSource == "remote" {
 - `GET /api/devices/{id}` → single device
 - Webhook or MQTT event on device change
 
-**Effort**: 
+**Effort**:
 - Phase 1: ~4 hours
-- Phase 2: ~4 hours  
+- Phase 2: ~4 hours
 - Phase 3: ~2 hours
 
 ---
