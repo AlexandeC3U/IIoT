@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nexus-edge/protocol-gateway/internal/domain"
+	"github.com/nexus-edge/protocol-gateway/internal/metrics"
 	"github.com/rs/zerolog"
 	"github.com/sony/gobreaker"
 )
@@ -17,18 +18,27 @@ type Pool struct {
 	clients        map[string]*clientEntry
 	mu             sync.RWMutex
 	logger         zerolog.Logger
+	metrics        *metrics.Registry
 	maxConnections int
 	idleTimeout    time.Duration
+	maxTTL         time.Duration
 	healthCheck    time.Duration
 	stopChan       chan struct{}
 	wg             sync.WaitGroup
+	closed         bool
 }
 
 // clientEntry represents a pooled client with its circuit breaker.
 type clientEntry struct {
-	client  *Client
-	breaker *gobreaker.CircuitBreaker
-	lastUse time.Time
+	client          *Client
+	device          *domain.Device
+	breaker         *gobreaker.CircuitBreaker
+	createdAt       time.Time // Connection creation time for MaxTTL enforcement
+	lastUse         time.Time
+	lastError       error
+	connectFailures int
+	nextReconnectAt time.Time
+	mu              sync.Mutex
 }
 
 // PoolConfig holds configuration for the connection pool.
@@ -42,8 +52,15 @@ type PoolConfig struct {
 	// HealthCheckInterval is how often to check connection health
 	HealthCheckInterval time.Duration
 
+	// RetryDelay is the base delay for reconnection attempts
+	RetryDelay time.Duration
+
 	// CircuitBreakerConfig holds circuit breaker settings
 	CircuitBreaker CircuitBreakerConfig
+
+	// MaxTTL is the maximum lifetime for a connection, even if active.
+	// Zero means no limit. Useful for S7 PLCs that leak resources.
+	MaxTTL time.Duration
 }
 
 // CircuitBreakerConfig holds circuit breaker configuration.
@@ -65,10 +82,9 @@ type CircuitBreakerConfig struct {
 }
 
 // NewPool creates a new S7 connection pool.
-// Default MaxConnections is 500 to support industrial-scale deployments (100-1000 devices).
-func NewPool(config PoolConfig, logger zerolog.Logger) *Pool {
+func NewPool(config PoolConfig, logger zerolog.Logger, metricsReg *metrics.Registry) *Pool {
 	if config.MaxConnections == 0 {
-		config.MaxConnections = 500
+		config.MaxConnections = 100
 	}
 	if config.IdleTimeout == 0 {
 		config.IdleTimeout = 5 * time.Minute
@@ -76,12 +92,17 @@ func NewPool(config PoolConfig, logger zerolog.Logger) *Pool {
 	if config.HealthCheckInterval == 0 {
 		config.HealthCheckInterval = 30 * time.Second
 	}
+	if config.RetryDelay == 0 {
+		config.RetryDelay = 5 * time.Second
+	}
 
 	pool := &Pool{
 		clients:        make(map[string]*clientEntry),
 		logger:         logger.With().Str("component", "s7-pool").Logger(),
+		metrics:        metricsReg,
 		maxConnections: config.MaxConnections,
 		idleTimeout:    config.IdleTimeout,
+		maxTTL:         config.MaxTTL,
 		healthCheck:    config.HealthCheckInterval,
 		stopChan:       make(chan struct{}),
 	}
@@ -89,6 +110,10 @@ func NewPool(config PoolConfig, logger zerolog.Logger) *Pool {
 	// Start background health check
 	pool.wg.Add(1)
 	go pool.healthCheckLoop()
+
+	// Start idle connection reaper
+	pool.wg.Add(1)
+	go pool.idleReaperLoop()
 
 	return pool
 }
@@ -118,15 +143,39 @@ func (p *Pool) GetOrCreate(ctx context.Context, device *domain.Device) (*Client,
 		return nil, err
 	}
 
-	// Create circuit breaker for this device
+	// Create circuit breaker for this device (with per-device overrides)
+	cbMaxRequests := uint32(3)
+	cbInterval := 10 * time.Second
+	cbTimeout := 30 * time.Second
+	cbFailureThreshold := uint32(5)
+	cbFailureRatio := 0.5
+
+	if cb := device.Connection.CircuitBreaker; cb != nil {
+		if cb.MaxRequests > 0 {
+			cbMaxRequests = cb.MaxRequests
+		}
+		if cb.Interval > 0 {
+			cbInterval = cb.Interval
+		}
+		if cb.Timeout > 0 {
+			cbTimeout = cb.Timeout
+		}
+		if cb.FailureThreshold > 0 {
+			cbFailureThreshold = cb.FailureThreshold
+		}
+		if cb.FailureRatio > 0 {
+			cbFailureRatio = cb.FailureRatio
+		}
+	}
+
 	breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
 		Name:        fmt.Sprintf("s7-%s", device.ID),
-		MaxRequests: 3,
-		Interval:    10 * time.Second,
-		Timeout:     30 * time.Second,
+		MaxRequests: cbMaxRequests,
+		Interval:    cbInterval,
+		Timeout:     cbTimeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 5 && failureRatio >= 0.5
+			ratio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= cbFailureThreshold && ratio >= cbFailureRatio
 		},
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			p.logger.Info().
@@ -137,10 +186,13 @@ func (p *Pool) GetOrCreate(ctx context.Context, device *domain.Device) (*Client,
 		},
 	})
 
+	now := time.Now()
 	p.clients[device.ID] = &clientEntry{
-		client:  client,
-		breaker: breaker,
-		lastUse: time.Now(),
+		client:    client,
+		device:    device,
+		breaker:   breaker,
+		createdAt: now,
+		lastUse:   now,
 	}
 
 	return client, nil
@@ -176,7 +228,12 @@ func (p *Pool) createClient(ctx context.Context, device *domain.Device) (*Client
 		return nil, err
 	}
 
-	if err := client.Connect(ctx); err != nil {
+	start := time.Now()
+	err = client.Connect(ctx)
+	if p.metrics != nil {
+		p.metrics.RecordConnectionForProtocol(string(domain.ProtocolS7), err == nil, time.Since(start).Seconds())
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -200,11 +257,21 @@ func (p *Pool) ReadTag(ctx context.Context, device *domain.Device, tag *domain.T
 		_ = client // Used indirectly via entry
 	}
 
+	start := time.Now()
+
 	// Execute read through circuit breaker
 	result, err := entry.breaker.Execute(func() (interface{}, error) {
 		return entry.client.ReadTag(ctx, tag)
 	})
+
+	if p.metrics != nil {
+		p.metrics.RecordS7ReadDuration(device.ID, time.Since(start).Seconds())
+	}
+
 	if err != nil {
+		if p.metrics != nil {
+			p.metrics.RecordS7TagError(device.ID, tag.ID)
+		}
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
 		}
@@ -231,10 +298,17 @@ func (p *Pool) ReadTags(ctx context.Context, device *domain.Device, tags []*doma
 		_ = client
 	}
 
+	start := time.Now()
+
 	// Execute read through circuit breaker
 	result, err := entry.breaker.Execute(func() (interface{}, error) {
 		return entry.client.ReadTags(ctx, tags)
 	})
+
+	if p.metrics != nil {
+		p.metrics.RecordS7ReadDuration(device.ID, time.Since(start).Seconds())
+	}
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -262,11 +336,21 @@ func (p *Pool) WriteTag(ctx context.Context, device *domain.Device, tag *domain.
 		_ = client
 	}
 
+	start := time.Now()
+
 	// Execute write through circuit breaker
 	_, err := entry.breaker.Execute(func() (interface{}, error) {
 		return nil, entry.client.WriteTag(ctx, tag, value)
 	})
+
+	if p.metrics != nil {
+		p.metrics.RecordS7WriteDuration(device.ID, time.Since(start).Seconds())
+	}
+
 	if err != nil {
+		if p.metrics != nil {
+			p.metrics.RecordS7TagError(device.ID, tag.ID)
+		}
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
 		}
@@ -296,20 +380,56 @@ func (p *Pool) WriteTags(ctx context.Context, device *domain.Device, writes []Ta
 		p.mu.RUnlock()
 	}
 
-	errors := make([]error, len(writes))
-	for i, write := range writes {
-		_, err := entry.breaker.Execute(func() (interface{}, error) {
-			return nil, entry.client.WriteTag(ctx, write.Tag, write.Value)
-		})
-		if err != nil {
-			if err == gobreaker.ErrOpenState {
-				errors[i] = domain.ErrCircuitBreakerOpen
-			} else {
-				errors[i] = err
+	start := time.Now()
+
+	// Execute batch write through circuit breaker.
+	// We pass the first non-nil error to the breaker for state tracking,
+	// but always return the full per-item error slice to the caller.
+	result, err := entry.breaker.Execute(func() (interface{}, error) {
+		errs := entry.client.WriteTags(ctx, writes)
+		for _, e := range errs {
+			if e != nil {
+				return errs, e // Signal breaker with first error
+			}
+		}
+		return errs, nil
+	})
+
+	if p.metrics != nil {
+		p.metrics.RecordS7WriteDuration(device.ID, time.Since(start).Seconds())
+	}
+
+	if err == gobreaker.ErrOpenState {
+		errors := make([]error, len(writes))
+		for i := range errors {
+			errors[i] = domain.ErrCircuitBreakerOpen
+		}
+		return errors
+	}
+
+	// Record per-tag errors for metrics
+	if p.metrics != nil {
+		if perItemErrs, ok := result.([]error); ok {
+			for i, e := range perItemErrs {
+				if e != nil && i < len(writes) {
+					p.metrics.RecordS7TagError(device.ID, writes[i].Tag.ID)
+				}
 			}
 		}
 	}
 
+	// Result contains the per-item error slice from WriteTags
+	if perItemErrs, ok := result.([]error); ok {
+		return perItemErrs
+	}
+
+	// Fallback: shouldn't happen, but return the breaker error for all items
+	errors := make([]error, len(writes))
+	if err != nil {
+		for i := range errors {
+			errors[i] = err
+		}
+	}
 	return errors
 }
 
@@ -317,6 +437,12 @@ func (p *Pool) WriteTags(ctx context.Context, device *domain.Device, writes []Ta
 type TagWrite struct {
 	Tag   *domain.Tag
 	Value interface{}
+}
+
+// indexedWrite pairs a TagWrite with its original index for batch error tracking.
+type indexedWrite struct {
+	origIndex int
+	write     TagWrite
 }
 
 // Remove removes a client from the pool and closes its connection.
@@ -339,10 +465,18 @@ func (p *Pool) Close() error {
 	p.wg.Wait()
 
 	p.mu.Lock()
+	p.closed = true
 	defer p.mu.Unlock()
 
+	// Collect client IDs first to avoid deleting from map during iteration
+	clientIDs := make([]string, 0, len(p.clients))
+	for id := range p.clients {
+		clientIDs = append(clientIDs, id)
+	}
+
 	var lastErr error
-	for id, entry := range p.clients {
+	for _, id := range clientIDs {
+		entry := p.clients[id]
 		if err := entry.client.Disconnect(); err != nil {
 			p.logger.Error().Err(err).Str("device", id).Msg("Error closing S7 connection")
 			lastErr = err
@@ -381,7 +515,7 @@ func (p *Pool) evictIdleConnection() bool {
 	return true
 }
 
-// healthCheckLoop periodically checks connection health.
+// healthCheckLoop periodically checks connection health and attempts reconnections.
 func (p *Pool) healthCheckLoop() {
 	defer p.wg.Done()
 
@@ -393,29 +527,132 @@ func (p *Pool) healthCheckLoop() {
 		case <-p.stopChan:
 			return
 		case <-ticker.C:
-			p.checkConnections()
+			p.checkConnectionsAndReconnect()
+			p.publishActiveConnectionMetrics()
 		}
 	}
 }
 
-// checkConnections checks all connections and removes dead ones.
-func (p *Pool) checkConnections() {
+// idleReaperLoop removes idle connections that haven't been used.
+func (p *Pool) idleReaperLoop() {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(p.idleTimeout / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopChan:
+			return
+		case <-ticker.C:
+			p.reapIdleConnections()
+		}
+	}
+}
+
+func (p *Pool) publishActiveConnectionMetrics() {
+	if p.metrics == nil {
+		return
+	}
+
+	active := 0
+	p.mu.RLock()
+	for _, entry := range p.clients {
+		connected := entry.client.IsConnected()
+		if connected {
+			active++
+		}
+
+		// Per-device metrics
+		deviceID := entry.client.DeviceID()
+		p.metrics.RecordS7DeviceConnected(deviceID, connected)
+
+		// Circuit breaker state: 0=closed, 1=half-open, 2=open
+		breakerState := 0
+		switch entry.breaker.State() {
+		case gobreaker.StateHalfOpen:
+			breakerState = 1
+		case gobreaker.StateOpen:
+			breakerState = 2
+		}
+		p.metrics.RecordS7BreakerState(deviceID, breakerState)
+	}
+	p.mu.RUnlock()
+
+	p.metrics.UpdateActiveConnectionsForProtocol(string(domain.ProtocolS7), active)
+}
+
+// checkConnectionsAndReconnect checks all connections and attempts to reconnect disconnected ones.
+func (p *Pool) checkConnectionsAndReconnect() {
+	// First pass: identify disconnected clients that need reconnection
+	p.mu.RLock()
+	type reconnectCandidate struct {
+		id    string
+		entry *clientEntry
+	}
+	candidates := make([]reconnectCandidate, 0)
+	for id, entry := range p.clients {
+		if !entry.client.IsConnected() {
+			candidates = append(candidates, reconnectCandidate{id: id, entry: entry})
+		}
+	}
+	p.mu.RUnlock()
+
+	// Second pass: attempt reconnection for each candidate
+	now := time.Now()
+	for _, c := range candidates {
+		c.entry.mu.Lock()
+
+		// Skip if circuit breaker is open
+		if c.entry.breaker.State() == gobreaker.StateOpen {
+			c.entry.mu.Unlock()
+			continue
+		}
+
+		// Check if we should attempt reconnection (with backoff)
+		if !c.entry.canAttemptReconnect(now) {
+			c.entry.mu.Unlock()
+			continue
+		}
+
+		p.logger.Debug().Str("device", c.id).Msg("Attempting to reconnect S7 client")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		start := time.Now()
+		err := c.entry.client.Connect(ctx)
+		if p.metrics != nil {
+			p.metrics.RecordConnectionForProtocol(string(domain.ProtocolS7), err == nil, time.Since(start).Seconds())
+		}
+		cancel()
+
+		c.entry.recordConnectResult(now, err, 5*time.Second)
+
+		if err != nil {
+			p.logger.Warn().Err(err).Str("device", c.id).Msg("Failed to reconnect S7 client")
+		} else {
+			p.logger.Info().Str("device", c.id).Msg("Successfully reconnected S7 client")
+		}
+
+		c.entry.mu.Unlock()
+	}
+}
+
+// reapIdleConnections removes connections that have been idle too long.
+func (p *Pool) reapIdleConnections() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.closed {
+		return
+	}
 
 	now := time.Now()
 	toRemove := make([]string, 0)
 
 	for id, entry := range p.clients {
-		// Check if connection is idle for too long
-		if now.Sub(entry.lastUse) > p.idleTimeout {
-			toRemove = append(toRemove, id)
-			continue
-		}
-
-		// Check if connection is still alive
-		if !entry.client.IsConnected() {
-			p.logger.Warn().Str("device", id).Msg("S7 connection lost, removing from pool")
+		idle := now.Sub(entry.lastUse) > p.idleTimeout
+		expired := p.maxTTL > 0 && now.Sub(entry.createdAt) > p.maxTTL
+		if idle || expired {
 			toRemove = append(toRemove, id)
 		}
 	}
@@ -424,74 +661,47 @@ func (p *Pool) checkConnections() {
 		entry := p.clients[id]
 		delete(p.clients, id)
 		entry.client.Disconnect()
+		p.logger.Debug().Str("device", id).Msg("Reaped idle S7 connection")
 	}
 
 	if len(toRemove) > 0 {
-		p.logger.Debug().Int("removed", len(toRemove)).Int("remaining", len(p.clients)).Msg("S7 pool cleanup complete")
+		p.logger.Debug().
+			Int("removed", len(toRemove)).
+			Int("remaining", len(p.clients)).
+			Msg("S7 idle reaper complete")
 	}
 }
 
-// GetStats returns pool statistics.
-func (p *Pool) GetStats() PoolStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+// =============================================================================
+// Client Entry Methods
+// =============================================================================
 
-	stats := PoolStats{
-		TotalConnections: len(p.clients),
-		MaxConnections:   p.maxConnections,
-		Devices:          make([]DeviceStats, 0, len(p.clients)),
-	}
-
-	for id, entry := range p.clients {
-		clientStats := entry.client.GetStats()
-		stats.Devices = append(stats.Devices, DeviceStats{
-			DeviceID:     id,
-			Connected:    entry.client.IsConnected(),
-			LastUsed:     entry.lastUse,
-			ReadCount:    clientStats["read_count"],
-			WriteCount:   clientStats["write_count"],
-			ErrorCount:   clientStats["error_count"],
-			BreakerState: entry.breaker.State().String(),
-		})
-	}
-
-	return stats
+func (ce *clientEntry) canAttemptReconnect(now time.Time) bool {
+	return ce.nextReconnectAt.IsZero() || !now.Before(ce.nextReconnectAt)
 }
 
-// PoolStats contains pool statistics.
-type PoolStats struct {
-	TotalConnections int
-	MaxConnections   int
-	Devices          []DeviceStats
-}
-
-// DeviceStats contains per-device statistics.
-type DeviceStats struct {
-	DeviceID     string
-	Connected    bool
-	LastUsed     time.Time
-	ReadCount    uint64
-	WriteCount   uint64
-	ErrorCount   uint64
-	BreakerState string
-}
-
-// HealthCheck performs a health check on the pool.
-func (p *Pool) HealthCheck(ctx context.Context) error {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	// Check if any clients are connected
-	for _, entry := range p.clients {
-		if entry.client.IsConnected() {
-			return nil
-		}
+func (ce *clientEntry) recordConnectResult(now time.Time, err error, baseDelay time.Duration) {
+	if err == nil {
+		ce.lastError = nil
+		ce.connectFailures = 0
+		ce.nextReconnectAt = time.Time{}
+		return
 	}
 
-	// No clients or all disconnected - check if pool is operational
-	if len(p.clients) == 0 {
-		return nil // Empty pool is healthy
+	ce.lastError = err
+	ce.connectFailures++
+
+	// Calculate exponential backoff
+	shift := ce.connectFailures - 1
+	if shift > 6 {
+		shift = 6
 	}
 
-	return domain.ErrConnectionClosed
+	delay := baseDelay * time.Duration(1<<uint(shift))
+	maxDelay := 5 * time.Minute
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	ce.nextReconnectAt = now.Add(delay)
 }

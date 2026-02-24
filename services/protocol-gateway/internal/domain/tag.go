@@ -109,10 +109,30 @@ type Tag struct {
 	// AccessMode specifies read/write access (read, write, readwrite)
 	AccessMode AccessMode `json:"access_mode,omitempty" yaml:"access_mode,omitempty"`
 
-	// OPCNodeID is the OPC UA node identifier (e.g., "ns=2;s=Temperature" or "ns=2;i=1234")
+	// Priority defines the QoS tier for this tag:
+	//   0 = Telemetry (default) - regular data, best-effort delivery
+	//   1 = Control - write commands, operational data, higher priority
+	//   2 = Safety/Alarm - emergency stops, alarms, highest priority
+	// Higher priority tags get dedicated worker pools and faster processing.
+	Priority uint8 `json:"priority,omitempty" yaml:"priority,omitempty"`
+
+	// OPCNodeID is the OPC UA node identifier. Supports two formats:
+	//   - Index-based (legacy):  "ns=2;s=Temperature" or "ns=2;i=1234"
+	//   - URI-based (preferred): "nsu=http://example.org/UA/;s=Temperature"
+	// The URI-based format (nsu=) is more stable across server restarts as namespace
+	// indices can change, while namespace URIs are globally unique and persistent.
+	// When using nsu=, the client automatically resolves the URI to the current index.
 	OPCNodeID string `json:"opc_node_id,omitempty" yaml:"opc_node_id,omitempty"`
 
+	// OPCNamespaceURI is the stable namespace URI for OPC UA (e.g., "http://example.org/UA/").
+	// If specified along with OPCNodeID, this URI takes precedence over any ns= in OPCNodeID.
+	// This provides a stable identifier that survives server restarts where namespace
+	// indices might be reordered. The client resolves this URI to the server's current
+	// namespace index at runtime.
+	OPCNamespaceURI string `json:"opc_namespace_uri,omitempty" yaml:"opc_namespace_uri,omitempty"`
+
 	// OPCNamespaceIndex is the OPC UA namespace index (if not included in OPCNodeID)
+	// Deprecated: Prefer using OPCNamespaceURI for stable configuration.
 	OPCNamespaceIndex uint16 `json:"opc_namespace_index,omitempty" yaml:"opc_namespace_index,omitempty"`
 
 	// === S7 (Siemens) Specific Fields ===
@@ -160,6 +180,21 @@ const (
 
 // Validate performs validation on the tag configuration.
 func (t *Tag) Validate() error {
+	// Backwards-compatible behavior: infer protocol from which protocol-specific
+	// fields are present. Prefer ValidateForProtocol when the protocol is known.
+	if t.OPCNodeID != "" {
+		return t.ValidateForProtocol(ProtocolOPCUA)
+	}
+	if t.S7Address != "" {
+		return t.ValidateForProtocol(ProtocolS7)
+	}
+	// If the protocol isn't explicit on the tag, default to Modbus-style checks.
+	return t.ValidateForProtocol(ProtocolModbusTCP)
+}
+
+// ValidateForProtocol performs validation on the tag configuration with the
+// device's protocol context.
+func (t *Tag) ValidateForProtocol(protocol Protocol) error {
 	if t.ID == "" {
 		return fmt.Errorf("tag ID is required")
 	}
@@ -173,15 +208,17 @@ func (t *Tag) Validate() error {
 		return fmt.Errorf("data type is required for tag %s", t.ID)
 	}
 
-	// RegisterType is only required for Modbus tags (not OPC UA or S7)
-	// OPC UA uses OPCNodeID, S7 uses S7Address
-	isModbus := t.OPCNodeID == "" && t.S7Address == ""
-	if isModbus && t.RegisterType == "" {
-		return fmt.Errorf("register type is required for Modbus tag %s", t.ID)
-	}
+	switch protocol {
+	case ProtocolModbusTCP, ProtocolModbusRTU:
+		if t.RegisterType == "" {
+			return fmt.Errorf("register type is required for Modbus tag %s", t.ID)
+		}
 
-	// Validate register count based on data type (Modbus only)
-	if isModbus {
+		// Validate bit position if specified (must be 0-7)
+		if t.BitPosition != nil && *t.BitPosition > 7 {
+			return fmt.Errorf("bit position %d is out of range (must be 0-7) for Modbus tag %s", *t.BitPosition, t.ID)
+		}
+
 		expectedCount := t.ExpectedRegisterCount()
 		if t.RegisterCount == 0 {
 			t.RegisterCount = expectedCount
@@ -190,10 +227,21 @@ func (t *Tag) Validate() error {
 				t.RegisterCount, t.DataType, expectedCount)
 		}
 
-		// Set default byte order
 		if t.ByteOrder == "" {
 			t.ByteOrder = ByteOrderBigEndian
 		}
+	case ProtocolOPCUA:
+		if t.OPCNodeID == "" {
+			return fmt.Errorf("opc node id is required for OPC UA tag %s", t.ID)
+		}
+	case ProtocolS7:
+		if t.S7Address == "" {
+			return fmt.Errorf("s7 address is required for S7 tag %s", t.ID)
+		}
+	case ProtocolMQTT:
+		// No extra required fields beyond the common ones.
+	default:
+		return fmt.Errorf("unsupported protocol %q for tag %s", protocol, t.ID)
 	}
 
 	// Set default scale factor
@@ -259,4 +307,3 @@ func (t *Tag) IsReadable() bool {
 	// By default, all tags are readable
 	return true
 }
-

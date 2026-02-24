@@ -5,65 +5,17 @@ package modbus
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"math"
+	"io"
+	"math/rand/v2"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goburrow/modbus"
 	"github.com/nexus-edge/protocol-gateway/internal/domain"
 	"github.com/rs/zerolog"
 )
-
-// Client represents a Modbus client connection to a single device.
-type Client struct {
-	config     ClientConfig
-	handler    *modbus.TCPClientHandler
-	client     modbus.Client
-	logger     zerolog.Logger
-	mu         sync.RWMutex
-	connected  atomic.Bool
-	lastError  error
-	lastUsed   time.Time
-	stats      *ClientStats
-	deviceID   string
-}
-
-// ClientConfig holds configuration for a Modbus client.
-type ClientConfig struct {
-	// Address is the host:port for TCP or serial port for RTU
-	Address string
-
-	// SlaveID is the Modbus slave/unit ID (1-247)
-	SlaveID byte
-
-	// Timeout is the connection and response timeout
-	Timeout time.Duration
-
-	// IdleTimeout is how long to keep idle connections open
-	IdleTimeout time.Duration
-
-	// MaxRetries is the number of retry attempts on transient failures
-	MaxRetries int
-
-	// RetryDelay is the base delay between retries (exponential backoff applied)
-	RetryDelay time.Duration
-
-	// Protocol specifies TCP or RTU
-	Protocol domain.Protocol
-}
-
-// ClientStats tracks client performance metrics.
-type ClientStats struct {
-	ReadCount      atomic.Uint64
-	WriteCount     atomic.Uint64
-	ErrorCount     atomic.Uint64
-	RetryCount     atomic.Uint64
-	TotalReadTime  atomic.Int64 // nanoseconds
-	TotalWriteTime atomic.Int64 // nanoseconds
-}
 
 // NewClient creates a new Modbus client with the given configuration.
 func NewClient(deviceID string, config ClientConfig, logger zerolog.Logger) (*Client, error) {
@@ -123,10 +75,19 @@ func (c *Client) Connect(ctx context.Context) error {
 	select {
 	case err := <-connectDone:
 		if err != nil {
+			// Close handler to release resources on failure
+			handler.Close()
 			c.lastError = err
 			return fmt.Errorf("%w: %v", domain.ErrConnectionFailed, err)
 		}
 	case <-ctx.Done():
+		// Context cancelled - close handler in background to prevent leak
+		// The Connect() goroutine may still be running, but handler.Close()
+		// will cause it to fail and return.
+		go func() {
+			<-connectDone // Wait for connect goroutine to finish
+			handler.Close()
+		}()
 		return fmt.Errorf("%w: %v", domain.ErrConnectionTimeout, ctx.Err())
 	}
 
@@ -149,13 +110,16 @@ func (c *Client) Disconnect() error {
 		return nil
 	}
 
+	// Mark as disconnected BEFORE clearing handler/client to prevent
+	// racing goroutines from using nil pointers
+	c.connected.Store(false)
+
 	if c.handler != nil {
 		if err := c.handler.Close(); err != nil {
 			c.logger.Warn().Err(err).Msg("Error closing Modbus connection")
 		}
 	}
 
-	c.connected.Store(false)
 	c.handler = nil
 	c.client = nil
 
@@ -211,6 +175,7 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 		// Check if error is retryable
 		if !c.isRetryableError(err) {
 			c.stats.ErrorCount.Add(1)
+			c.recordTagError(tag.ID, err)
 			return c.createErrorDataPoint(tag, err), err
 		}
 
@@ -223,22 +188,24 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.recordTagError(tag.ID, err)
 		return c.createErrorDataPoint(tag, err), err
 	}
 
 	c.stats.ReadCount.Add(1)
+	c.recordTagSuccess(tag.ID)
 
 	// Parse the raw bytes into a typed value
-	value, err := c.parseValue(rawBytes, tag)
+	value, err := parseValue(rawBytes, tag)
 	if err != nil {
 		return c.createErrorDataPoint(tag, err), err
 	}
 
 	// Apply scaling and offset
-	scaledValue := c.applyScaling(value, tag)
+	scaledValue := applyScaling(value, tag)
 
 	// Create data point
-	dp := domain.NewDataPoint(
+	dp := domain.AcquireDataPoint(
 		c.deviceID,
 		tag.ID,
 		"", // Topic will be set by the caller
@@ -277,6 +244,7 @@ func (c *Client) ReadTags(ctx context.Context, tags []*domain.Tag) ([]*domain.Da
 }
 
 // readRegisters performs the actual Modbus read operation.
+// Uses opMu to serialize operations - goburrow/modbus Client is NOT thread-safe.
 func (c *Client) readRegisters(tag *domain.Tag) ([]byte, error) {
 	c.mu.RLock()
 	client := c.client
@@ -285,6 +253,16 @@ func (c *Client) readRegisters(tag *domain.Tag) ([]byte, error) {
 	if client == nil {
 		return nil, domain.ErrConnectionClosed
 	}
+
+	// Validate Modbus protocol limits
+	// Per Modbus spec: max 125 registers (holding/input), max 2000 coils/discrete inputs
+	if err := c.validateProtocolLimits(tag); err != nil {
+		return nil, err
+	}
+
+	// Serialize all Modbus operations to prevent protocol corruption
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
 
 	var result []byte
 	var err error
@@ -303,148 +281,62 @@ func (c *Client) readRegisters(tag *domain.Tag) ([]byte, error) {
 	}
 
 	if err != nil {
+		c.consecutiveFailures.Add(1)
 		return nil, c.translateModbusError(err)
 	}
 
+	c.consecutiveFailures.Store(0) // Reset on success
 	return result, nil
 }
 
-// parseValue converts raw bytes to a typed value based on the tag's data type.
-func (c *Client) parseValue(data []byte, tag *domain.Tag) (interface{}, error) {
-	if len(data) == 0 {
-		return nil, domain.ErrInvalidDataLength
+// Modbus protocol limits per spec
+const (
+	MaxHoldingRegisters = 125  // FC03/FC04: max registers per read
+	MaxInputRegisters   = 125  // FC03/FC04: max registers per read
+	MaxCoils            = 2000 // FC01/FC02: max coils/discrete inputs per read
+	MaxDiscreteInputs   = 2000
+	MaxWriteRegisters   = 123  // FC16: max registers per write
+	MaxWriteCoils       = 1968 // FC15: max coils per write
+)
+
+// validateProtocolLimits ensures the tag request is within Modbus protocol limits.
+func (c *Client) validateProtocolLimits(tag *domain.Tag) error {
+	// Validate RegisterCount is not zero
+	if tag.RegisterCount == 0 {
+		return fmt.Errorf("%w: RegisterCount cannot be 0 for tag %q",
+			domain.ErrInvalidRegisterCount, tag.ID)
 	}
 
-	// Handle coil/discrete input (boolean) values
-	if tag.RegisterType == domain.RegisterTypeCoil || 
-	   tag.RegisterType == domain.RegisterTypeDiscreteInput {
-		if tag.BitPosition != nil {
-			return (data[0] & (1 << *tag.BitPosition)) != 0, nil
+	switch tag.RegisterType {
+	case domain.RegisterTypeHoldingRegister:
+		if tag.RegisterCount > MaxHoldingRegisters {
+			return fmt.Errorf("%w: holding register count %d exceeds max %d",
+				domain.ErrModbusProtocolLimit, tag.RegisterCount, MaxHoldingRegisters)
 		}
-		return data[0] != 0, nil
-	}
-
-	// Handle register values
-	expectedLen := int(tag.RegisterCount) * 2
-	if len(data) < expectedLen {
-		return nil, domain.ErrInvalidDataLength
-	}
-
-	// Reorder bytes based on byte order
-	orderedData := c.reorderBytes(data[:expectedLen], tag.ByteOrder)
-
-	switch tag.DataType {
-	case domain.DataTypeBool:
-		if tag.BitPosition != nil {
-			val := binary.BigEndian.Uint16(orderedData)
-			return (val & (1 << *tag.BitPosition)) != 0, nil
+	case domain.RegisterTypeInputRegister:
+		if tag.RegisterCount > MaxInputRegisters {
+			return fmt.Errorf("%w: input register count %d exceeds max %d",
+				domain.ErrModbusProtocolLimit, tag.RegisterCount, MaxInputRegisters)
 		}
-		return orderedData[0] != 0 || orderedData[1] != 0, nil
-
-	case domain.DataTypeInt16:
-		return int16(binary.BigEndian.Uint16(orderedData)), nil
-
-	case domain.DataTypeUInt16:
-		return binary.BigEndian.Uint16(orderedData), nil
-
-	case domain.DataTypeInt32:
-		return int32(binary.BigEndian.Uint32(orderedData)), nil
-
-	case domain.DataTypeUInt32:
-		return binary.BigEndian.Uint32(orderedData), nil
-
-	case domain.DataTypeInt64:
-		return int64(binary.BigEndian.Uint64(orderedData)), nil
-
-	case domain.DataTypeUInt64:
-		return binary.BigEndian.Uint64(orderedData), nil
-
-	case domain.DataTypeFloat32:
-		bits := binary.BigEndian.Uint32(orderedData)
-		return math.Float32frombits(bits), nil
-
-	case domain.DataTypeFloat64:
-		bits := binary.BigEndian.Uint64(orderedData)
-		return math.Float64frombits(bits), nil
-
-	default:
-		return nil, domain.ErrInvalidDataType
-	}
-}
-
-// reorderBytes reorders bytes according to the specified byte order.
-func (c *Client) reorderBytes(data []byte, order domain.ByteOrder) []byte {
-	if len(data) <= 2 {
-		if order == domain.ByteOrderLittleEndian {
-			return []byte{data[1], data[0]}
+	case domain.RegisterTypeCoil:
+		if tag.RegisterCount > MaxCoils {
+			return fmt.Errorf("%w: coil count %d exceeds max %d",
+				domain.ErrModbusProtocolLimit, tag.RegisterCount, MaxCoils)
 		}
-		return data
-	}
-
-	result := make([]byte, len(data))
-	switch order {
-	case domain.ByteOrderBigEndian: // ABCD
-		copy(result, data)
-
-	case domain.ByteOrderLittleEndian: // DCBA
-		for i := 0; i < len(data); i++ {
-			result[i] = data[len(data)-1-i]
+	case domain.RegisterTypeDiscreteInput:
+		if tag.RegisterCount > MaxDiscreteInputs {
+			return fmt.Errorf("%w: discrete input count %d exceeds max %d",
+				domain.ErrModbusProtocolLimit, tag.RegisterCount, MaxDiscreteInputs)
 		}
-
-	case domain.ByteOrderMidBigEndian: // BADC (word swap)
-		for i := 0; i < len(data); i += 2 {
-			result[i] = data[i+1]
-			result[i+1] = data[i]
-		}
-
-	case domain.ByteOrderMidLitEndian: // CDAB (byte swap)
-		for i := 0; i < len(data); i += 4 {
-			if i+3 < len(data) {
-				result[i] = data[i+2]
-				result[i+1] = data[i+3]
-				result[i+2] = data[i]
-				result[i+3] = data[i+1]
-			}
-		}
-
-	default:
-		copy(result, data)
 	}
 
-	return result
-}
-
-// applyScaling applies scale factor and offset to the value.
-func (c *Client) applyScaling(value interface{}, tag *domain.Tag) interface{} {
-	if tag.ScaleFactor == 1.0 && tag.Offset == 0 {
-		return value
+	// Also validate address doesn't overflow (address + count <= 65535)
+	if uint32(tag.Address)+uint32(tag.RegisterCount) > 65535 {
+		return fmt.Errorf("%w: address range %d-%d exceeds 16-bit limit",
+			domain.ErrModbusProtocolLimit, tag.Address, uint32(tag.Address)+uint32(tag.RegisterCount)-1)
 	}
 
-	var floatVal float64
-	switch v := value.(type) {
-	case int16:
-		floatVal = float64(v)
-	case uint16:
-		floatVal = float64(v)
-	case int32:
-		floatVal = float64(v)
-	case uint32:
-		floatVal = float64(v)
-	case int64:
-		floatVal = float64(v)
-	case uint64:
-		floatVal = float64(v)
-	case float32:
-		floatVal = float64(v)
-	case float64:
-		floatVal = v
-	case bool:
-		return value // No scaling for booleans
-	default:
-		return value
-	}
-
-	return floatVal*tag.ScaleFactor + tag.Offset
+	return nil
 }
 
 // groupTagsByType groups tags by register type for efficient batch reads.
@@ -461,8 +353,370 @@ func (c *Client) groupTagsByType(tags []*domain.Tag) [][]*domain.Tag {
 	return result
 }
 
-// readTagGroup reads a group of tags of the same register type.
+// buildContiguousRanges groups tags into contiguous address ranges for batched reads.
+// This is the "performance crown jewel" - reduces N reads to 1-5 reads for 100+ tags.
+func (c *Client) buildContiguousRanges(tags []*domain.Tag, config BatchConfig) []RegisterRange {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	// Sort tags by address
+	sorted := make([]*domain.Tag, len(tags))
+	copy(sorted, tags)
+	sortTagsByAddress(sorted)
+
+	var ranges []RegisterRange
+	currentRange := RegisterRange{
+		StartAddress: sorted[0].Address,
+		EndAddress:   sorted[0].Address + sorted[0].RegisterCount - 1,
+		Tags:         []*domain.Tag{sorted[0]},
+	}
+
+	for i := 1; i < len(sorted); i++ {
+		tag := sorted[i]
+		tagEnd := tag.Address + tag.RegisterCount - 1
+
+		// Calculate gap between current range end and this tag's start
+		gap := int(tag.Address) - int(currentRange.EndAddress) - 1
+
+		// Calculate new range size if we merge
+		newRangeSize := tagEnd - currentRange.StartAddress + 1
+
+		// Merge if: gap is acceptable AND total size is within limits
+		if gap <= int(config.MaxGapSize) && newRangeSize <= config.MaxRegistersPerRead {
+			// Extend current range
+			if tagEnd > currentRange.EndAddress {
+				currentRange.EndAddress = tagEnd
+			}
+			currentRange.Tags = append(currentRange.Tags, tag)
+		} else {
+			// Start new range
+			ranges = append(ranges, currentRange)
+			currentRange = RegisterRange{
+				StartAddress: tag.Address,
+				EndAddress:   tagEnd,
+				Tags:         []*domain.Tag{tag},
+			}
+		}
+	}
+	// Don't forget the last range
+	ranges = append(ranges, currentRange)
+
+	return ranges
+}
+
+// sortTagsByAddress sorts tags by address in ascending order (insertion sort for small slices).
+func sortTagsByAddress(tags []*domain.Tag) {
+	for i := 1; i < len(tags); i++ {
+		j := i
+		for j > 0 && tags[j].Address < tags[j-1].Address {
+			tags[j], tags[j-1] = tags[j-1], tags[j]
+			j--
+		}
+	}
+}
+
+// readTagGroup reads a group of tags of the same register type using batched reads.
+// Uses range-based batching to minimize Modbus operations.
 func (c *Client) readTagGroup(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
+	// For coils/discrete inputs, use bit-packed contiguous range batching
+	if tags[0].RegisterType == domain.RegisterTypeCoil ||
+		tags[0].RegisterType == domain.RegisterTypeDiscreteInput {
+		return c.readCoilGroupBatched(ctx, tags)
+	}
+
+	// Build contiguous ranges for holding/input registers
+	config := DefaultBatchConfig()
+	ranges := c.buildContiguousRanges(tags, config)
+
+	c.logger.Debug().
+		Int("tags", len(tags)).
+		Int("ranges", len(ranges)).
+		Msg("Batched tags into register ranges")
+
+	results := make([]*domain.DataPoint, 0, len(tags))
+
+	for _, rng := range ranges {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+
+		rangeResults, err := c.readRegisterRange(ctx, rng, tags[0].RegisterType)
+		if err != nil {
+			c.logger.Warn().Err(err).
+				Uint16("start", rng.StartAddress).
+				Uint16("end", rng.EndAddress).
+				Msg("Failed to read register range")
+			// Add error points for all tags in this range
+			for _, tag := range rng.Tags {
+				results = append(results, c.createErrorDataPoint(tag, err))
+			}
+			continue
+		}
+		results = append(results, rangeResults...)
+	}
+
+	return results, nil
+}
+
+// readRegisterRange reads a contiguous range of registers and extracts individual tag values.
+func (c *Client) readRegisterRange(ctx context.Context, rng RegisterRange, regType domain.RegisterType) ([]*domain.DataPoint, error) {
+	registerCount := rng.EndAddress - rng.StartAddress + 1
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return nil, domain.ErrConnectionClosed
+	}
+
+	// Read the entire range in one Modbus operation
+	c.opMu.Lock()
+	var rawData []byte
+	var err error
+	switch regType {
+	case domain.RegisterTypeHoldingRegister:
+		rawData, err = client.ReadHoldingRegisters(rng.StartAddress, registerCount)
+	case domain.RegisterTypeInputRegister:
+		rawData, err = client.ReadInputRegisters(rng.StartAddress, registerCount)
+	default:
+		c.opMu.Unlock()
+		return nil, domain.ErrInvalidRegisterType
+	}
+	c.opMu.Unlock()
+
+	if err != nil {
+		c.consecutiveFailures.Add(1)
+		return nil, c.translateModbusError(err)
+	}
+	c.consecutiveFailures.Store(0)
+	c.stats.ReadCount.Add(1)
+
+	// Extract individual tag values from the raw data
+	results := make([]*domain.DataPoint, 0, len(rng.Tags))
+	for _, tag := range rng.Tags {
+		// Calculate offset within the raw data
+		offset := int(tag.Address-rng.StartAddress) * 2 // 2 bytes per register
+		tagByteLen := int(tag.RegisterCount) * 2
+
+		if offset < 0 || offset+tagByteLen > len(rawData) {
+			c.logger.Error().
+				Str("tag", tag.ID).
+				Uint16("address", tag.Address).
+				Int("offset", offset).
+				Int("len", len(rawData)).
+				Msg("Tag data out of range")
+			c.recordTagError(tag.ID, domain.ErrInvalidDataLength)
+			results = append(results, c.createErrorDataPoint(tag, domain.ErrInvalidDataLength))
+			continue
+		}
+
+		tagData := rawData[offset : offset+tagByteLen]
+
+		value, err := parseValue(tagData, tag)
+		if err != nil {
+			c.recordTagError(tag.ID, err)
+			results = append(results, c.createErrorDataPoint(tag, err))
+			continue
+		}
+
+		scaledValue := applyScaling(value, tag)
+		c.recordTagSuccess(tag.ID)
+
+		dp := domain.AcquireDataPoint(
+			c.deviceID,
+			tag.ID,
+			"",
+			scaledValue,
+			tag.Unit,
+			domain.QualityGood,
+		).WithRawValue(value).WithPriority(tag.Priority)
+
+		results = append(results, dp)
+	}
+
+	return results, nil
+}
+
+// CoilBatchConfig configures the coil/discrete input batching algorithm.
+type CoilBatchConfig struct {
+	// MaxCoilsPerRead is the maximum coils per single Modbus read (protocol limit: 2000)
+	MaxCoilsPerRead uint16
+	// MaxGapSize is the maximum gap between coil addresses to merge into one read
+	MaxGapSize uint16
+}
+
+// DefaultCoilBatchConfig returns sensible defaults for coil batching.
+func DefaultCoilBatchConfig() CoilBatchConfig {
+	return CoilBatchConfig{
+		MaxCoilsPerRead: 1000, // Conservative, well under 2000 limit
+		MaxGapSize:      32,   // Merge if gap <= 32 coils (only 4 extra bytes)
+	}
+}
+
+// readCoilGroupBatched reads coils/discrete inputs using contiguous range batching.
+// Coils are bit-packed in the Modbus response (8 coils per byte), so batching is
+// very efficient — reading 100 coils costs only 13 bytes vs 100 individual requests.
+func (c *Client) readCoilGroupBatched(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
+	config := DefaultCoilBatchConfig()
+	ranges := c.buildCoilRanges(tags, config)
+
+	c.logger.Debug().
+		Int("tags", len(tags)).
+		Int("ranges", len(ranges)).
+		Msg("Batched coils/discrete inputs into ranges")
+
+	results := make([]*domain.DataPoint, 0, len(tags))
+
+	for _, rng := range ranges {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+
+		rangeResults, err := c.readCoilRange(ctx, rng, tags[0].RegisterType)
+		if err != nil {
+			c.logger.Warn().Err(err).
+				Uint16("start", rng.StartAddress).
+				Uint16("end", rng.EndAddress).
+				Msg("Failed to read coil range")
+			for _, tag := range rng.Tags {
+				results = append(results, c.createErrorDataPoint(tag, err))
+			}
+			continue
+		}
+		results = append(results, rangeResults...)
+	}
+
+	return results, nil
+}
+
+// buildCoilRanges groups coil/discrete input tags into contiguous address ranges.
+// Similar to buildContiguousRanges but uses bit addressing (1 coil = 1 bit).
+func (c *Client) buildCoilRanges(tags []*domain.Tag, config CoilBatchConfig) []RegisterRange {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	sorted := make([]*domain.Tag, len(tags))
+	copy(sorted, tags)
+	sortTagsByAddress(sorted)
+
+	var ranges []RegisterRange
+	currentRange := RegisterRange{
+		StartAddress: sorted[0].Address,
+		EndAddress:   sorted[0].Address + sorted[0].RegisterCount - 1,
+		Tags:         []*domain.Tag{sorted[0]},
+	}
+
+	for i := 1; i < len(sorted); i++ {
+		tag := sorted[i]
+		tagEnd := tag.Address + tag.RegisterCount - 1
+
+		gap := int(tag.Address) - int(currentRange.EndAddress) - 1
+		newRangeSize := tagEnd - currentRange.StartAddress + 1
+
+		if gap <= int(config.MaxGapSize) && newRangeSize <= config.MaxCoilsPerRead {
+			if tagEnd > currentRange.EndAddress {
+				currentRange.EndAddress = tagEnd
+			}
+			currentRange.Tags = append(currentRange.Tags, tag)
+		} else {
+			ranges = append(ranges, currentRange)
+			currentRange = RegisterRange{
+				StartAddress: tag.Address,
+				EndAddress:   tagEnd,
+				Tags:         []*domain.Tag{tag},
+			}
+		}
+	}
+	ranges = append(ranges, currentRange)
+
+	return ranges
+}
+
+// readCoilRange reads a contiguous range of coils/discrete inputs and extracts
+// individual tag values from the bit-packed response.
+// Modbus packs 8 coils per byte, LSB first (coil 0 = bit 0 of byte 0).
+func (c *Client) readCoilRange(ctx context.Context, rng RegisterRange, regType domain.RegisterType) ([]*domain.DataPoint, error) {
+	coilCount := rng.EndAddress - rng.StartAddress + 1
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return nil, domain.ErrConnectionClosed
+	}
+
+	c.opMu.Lock()
+	var rawData []byte
+	var err error
+	switch regType {
+	case domain.RegisterTypeCoil:
+		rawData, err = client.ReadCoils(rng.StartAddress, coilCount)
+	case domain.RegisterTypeDiscreteInput:
+		rawData, err = client.ReadDiscreteInputs(rng.StartAddress, coilCount)
+	default:
+		c.opMu.Unlock()
+		return nil, domain.ErrInvalidRegisterType
+	}
+	c.opMu.Unlock()
+
+	if err != nil {
+		c.consecutiveFailures.Add(1)
+		return nil, c.translateModbusError(err)
+	}
+	c.consecutiveFailures.Store(0)
+	c.stats.ReadCount.Add(1)
+
+	// Extract individual tag values from bit-packed data
+	results := make([]*domain.DataPoint, 0, len(rng.Tags))
+	for _, tag := range rng.Tags {
+		bitOffset := int(tag.Address - rng.StartAddress)
+		byteIndex := bitOffset / 8
+		bitIndex := uint(bitOffset % 8)
+
+		if byteIndex >= len(rawData) {
+			c.recordTagError(tag.ID, domain.ErrInvalidDataLength)
+			results = append(results, c.createErrorDataPoint(tag, domain.ErrInvalidDataLength))
+			continue
+		}
+
+		value := (rawData[byteIndex] & (1 << bitIndex)) != 0
+
+		scaledValue := applyScaling(value, tag)
+		c.recordTagSuccess(tag.ID)
+
+		dp := domain.AcquireDataPoint(
+			c.deviceID,
+			tag.ID,
+			"",
+			scaledValue,
+			tag.Unit,
+			domain.QualityGood,
+		).WithRawValue(value).WithPriority(tag.Priority)
+
+		results = append(results, dp)
+	}
+
+	return results, nil
+}
+
+// readTagGroupIndividually reads tags one by one (fallback for coils/discrete inputs).
+func (c *Client) readTagGroupIndividually(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
 	results := make([]*domain.DataPoint, 0, len(tags))
 	for _, tag := range tags {
 		select {
@@ -490,7 +744,7 @@ func (c *Client) createErrorDataPoint(tag *domain.Tag, err error) *domain.DataPo
 		quality = domain.QualityNotConnected
 	}
 
-	return domain.NewDataPoint(
+	return domain.AcquireDataPoint(
 		c.deviceID,
 		tag.ID,
 		"",
@@ -500,14 +754,17 @@ func (c *Client) createErrorDataPoint(tag *domain.Tag, err error) *domain.DataPo
 	)
 }
 
-// calculateBackoff calculates exponential backoff delay.
+// calculateBackoff calculates exponential backoff delay with jitter.
+// Jitter prevents reconnection storms when multiple clients fail simultaneously.
 func (c *Client) calculateBackoff(attempt int) time.Duration {
 	delay := c.config.RetryDelay * time.Duration(1<<uint(attempt))
 	maxDelay := 10 * time.Second
 	if delay > maxDelay {
 		delay = maxDelay
 	}
-	return delay
+	// Add ±25% jitter to prevent thundering herd
+	jitter := time.Duration(rand.Int64N(int64(delay)/2)) - (delay / 4)
+	return delay + jitter
 }
 
 // isRetryableError determines if an error is transient and worth retrying.
@@ -520,6 +777,7 @@ func (c *Client) isRetryableError(err error) bool {
 }
 
 // isConnectionError checks if the error is a connection-related error.
+// Includes io.EOF which goburrow/modbus returns on connection drops.
 func (c *Client) isConnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -527,6 +785,29 @@ func (c *Client) isConnectionError(err error) bool {
 	// Check for network errors
 	if _, ok := err.(net.Error); ok {
 		return true
+	}
+	// goburrow/modbus often returns EOF on connection drops
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Check for common connection-related error strings
+	errStr := err.Error()
+	if contains(errStr, "connection reset", "broken pipe", "connection refused", "no route to host") {
+		return true
+	}
+	return false
+}
+
+// contains checks if s contains any of the substrings.
+func contains(s string, substrs ...string) bool {
+	for _, sub := range substrs {
+		if len(s) >= len(sub) {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
@@ -629,6 +910,7 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 }
 
 // writeRegister performs the actual Modbus write operation.
+// Uses opMu to serialize operations - goburrow/modbus Client is NOT thread-safe.
 func (c *Client) writeRegister(tag *domain.Tag, value interface{}) error {
 	c.mu.RLock()
 	client := c.client
@@ -638,19 +920,32 @@ func (c *Client) writeRegister(tag *domain.Tag, value interface{}) error {
 		return domain.ErrConnectionClosed
 	}
 
+	// Serialize all Modbus operations to prevent protocol corruption
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	var err error
 	switch tag.RegisterType {
 	case domain.RegisterTypeCoil:
-		return c.writeSingleCoil(client, tag.Address, value)
+		err = c.writeSingleCoilLocked(client, tag.Address, value)
 	case domain.RegisterTypeHoldingRegister:
-		return c.writeHoldingRegister(client, tag, value)
+		err = c.writeHoldingRegisterLocked(client, tag, value)
 	default:
 		return fmt.Errorf("%w: %s is read-only", domain.ErrTagNotWritable, tag.RegisterType)
 	}
+
+	if err != nil {
+		c.consecutiveFailures.Add(1)
+		return err
+	}
+	c.consecutiveFailures.Store(0)
+	return nil
 }
 
-// writeSingleCoil writes a boolean value to a coil (function code 0x05).
-func (c *Client) writeSingleCoil(client modbus.Client, address uint16, value interface{}) error {
-	boolValue, ok := c.toBool(value)
+// writeSingleCoilLocked writes a boolean value to a coil (function code 0x05).
+// Caller must hold opMu.
+func (c *Client) writeSingleCoilLocked(client modbus.Client, address uint16, value interface{}) error {
+	boolValue, ok := toBool(value)
 	if !ok {
 		return fmt.Errorf("%w: cannot convert %T to bool for coil", domain.ErrInvalidWriteValue, value)
 	}
@@ -670,10 +965,11 @@ func (c *Client) writeSingleCoil(client modbus.Client, address uint16, value int
 	return nil
 }
 
-// writeHoldingRegister writes a value to holding register(s).
-func (c *Client) writeHoldingRegister(client modbus.Client, tag *domain.Tag, value interface{}) error {
+// writeHoldingRegisterLocked writes a value to holding register(s).
+// Caller must hold opMu.
+func (c *Client) writeHoldingRegisterLocked(client modbus.Client, tag *domain.Tag, value interface{}) error {
 	// Convert value to bytes based on data type
-	bytes, err := c.valueToBytes(value, tag)
+	bytes, err := valueToBytes(value, tag)
 	if err != nil {
 		return err
 	}
@@ -721,13 +1017,19 @@ func (c *Client) WriteSingleCoil(ctx context.Context, address uint16, value bool
 		coilValue = 0xFF00
 	}
 
+	// Serialize all Modbus operations
+	c.opMu.Lock()
 	_, err := client.WriteSingleCoil(address, coilValue)
+	c.opMu.Unlock()
+
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.consecutiveFailures.Add(1)
 		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
 	}
 
 	c.stats.WriteCount.Add(1)
+	c.consecutiveFailures.Store(0)
 	return nil
 }
 
@@ -749,13 +1051,19 @@ func (c *Client) WriteSingleRegister(ctx context.Context, address uint16, value 
 		return domain.ErrConnectionClosed
 	}
 
+	// Serialize all Modbus operations
+	c.opMu.Lock()
 	_, err := client.WriteSingleRegister(address, value)
+	c.opMu.Unlock()
+
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.consecutiveFailures.Add(1)
 		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
 	}
 
 	c.stats.WriteCount.Add(1)
+	c.consecutiveFailures.Store(0)
 	return nil
 }
 
@@ -783,13 +1091,19 @@ func (c *Client) WriteMultipleRegisters(ctx context.Context, address uint16, val
 		binary.BigEndian.PutUint16(bytes[i*2:], v)
 	}
 
+	// Serialize all Modbus operations
+	c.opMu.Lock()
 	_, err := client.WriteMultipleRegisters(address, uint16(len(values)), bytes)
+	c.opMu.Unlock()
+
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.consecutiveFailures.Add(1)
 		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
 	}
 
 	c.stats.WriteCount.Add(1)
+	c.consecutiveFailures.Store(0)
 	return nil
 }
 
@@ -820,280 +1134,18 @@ func (c *Client) WriteMultipleCoils(ctx context.Context, address uint16, values 
 		}
 	}
 
+	// Serialize all Modbus operations
+	c.opMu.Lock()
 	_, err := client.WriteMultipleCoils(address, uint16(len(values)), bytes)
+	c.opMu.Unlock()
+
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.consecutiveFailures.Add(1)
 		return fmt.Errorf("%w: %v", domain.ErrWriteFailed, err)
 	}
 
 	c.stats.WriteCount.Add(1)
+	c.consecutiveFailures.Store(0)
 	return nil
 }
-
-// valueToBytes converts a value to bytes based on the tag's data type.
-func (c *Client) valueToBytes(value interface{}, tag *domain.Tag) ([]byte, error) {
-	// Reverse scaling if applied
-	actualValue := c.reverseScaling(value, tag)
-
-	var bytes []byte
-
-	switch tag.DataType {
-	case domain.DataTypeBool:
-		bytes = make([]byte, 2)
-		if b, ok := c.toBool(actualValue); ok && b {
-			binary.BigEndian.PutUint16(bytes, 1)
-		}
-
-	case domain.DataTypeInt16:
-		bytes = make([]byte, 2)
-		if v, ok := c.toInt64(actualValue); ok {
-			binary.BigEndian.PutUint16(bytes, uint16(int16(v)))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to int16", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeUInt16:
-		bytes = make([]byte, 2)
-		if v, ok := c.toInt64(actualValue); ok {
-			binary.BigEndian.PutUint16(bytes, uint16(v))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint16", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeInt32:
-		bytes = make([]byte, 4)
-		if v, ok := c.toInt64(actualValue); ok {
-			binary.BigEndian.PutUint32(bytes, uint32(int32(v)))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to int32", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeUInt32:
-		bytes = make([]byte, 4)
-		if v, ok := c.toInt64(actualValue); ok {
-			binary.BigEndian.PutUint32(bytes, uint32(v))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint32", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeInt64:
-		bytes = make([]byte, 8)
-		if v, ok := c.toInt64(actualValue); ok {
-			binary.BigEndian.PutUint64(bytes, uint64(v))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to int64", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeUInt64:
-		bytes = make([]byte, 8)
-		if v, ok := c.toUint64(actualValue); ok {
-			binary.BigEndian.PutUint64(bytes, v)
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint64", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeFloat32:
-		bytes = make([]byte, 4)
-		if v, ok := c.toFloat64(actualValue); ok {
-			binary.BigEndian.PutUint32(bytes, math.Float32bits(float32(v)))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to float32", domain.ErrInvalidWriteValue, value)
-		}
-
-	case domain.DataTypeFloat64:
-		bytes = make([]byte, 8)
-		if v, ok := c.toFloat64(actualValue); ok {
-			binary.BigEndian.PutUint64(bytes, math.Float64bits(v))
-		} else {
-			return nil, fmt.Errorf("%w: cannot convert %T to float64", domain.ErrInvalidWriteValue, value)
-		}
-
-	default:
-		return nil, fmt.Errorf("%w: unsupported data type %s", domain.ErrInvalidDataType, tag.DataType)
-	}
-
-	// Apply byte order transformation
-	bytes = c.reorderBytesForWrite(bytes, tag.ByteOrder)
-
-	return bytes, nil
-}
-
-// reverseScaling reverses the scaling for write operations.
-func (c *Client) reverseScaling(value interface{}, tag *domain.Tag) interface{} {
-	if tag.ScaleFactor == 1.0 && tag.Offset == 0 {
-		return value
-	}
-
-	floatVal, ok := c.toFloat64(value)
-	if !ok {
-		return value
-	}
-
-	return (floatVal - tag.Offset) / tag.ScaleFactor
-}
-
-// reorderBytesForWrite reorders bytes for write operations (inverse of read).
-func (c *Client) reorderBytesForWrite(data []byte, order domain.ByteOrder) []byte {
-	// The byte reordering for writes is the same as reads - just apply the same transformation
-	return c.reorderBytes(data, order)
-}
-
-// toBool converts a value to bool.
-func (c *Client) toBool(v interface{}) (bool, bool) {
-	switch val := v.(type) {
-	case bool:
-		return val, true
-	case int:
-		return val != 0, true
-	case int8:
-		return val != 0, true
-	case int16:
-		return val != 0, true
-	case int32:
-		return val != 0, true
-	case int64:
-		return val != 0, true
-	case uint:
-		return val != 0, true
-	case uint8:
-		return val != 0, true
-	case uint16:
-		return val != 0, true
-	case uint32:
-		return val != 0, true
-	case uint64:
-		return val != 0, true
-	case float32:
-		return val != 0, true
-	case float64:
-		return val != 0, true
-	default:
-		return false, false
-	}
-}
-
-// toInt64 converts a value to int64.
-func (c *Client) toInt64(v interface{}) (int64, bool) {
-	switch val := v.(type) {
-	case int:
-		return int64(val), true
-	case int8:
-		return int64(val), true
-	case int16:
-		return int64(val), true
-	case int32:
-		return int64(val), true
-	case int64:
-		return val, true
-	case uint:
-		return int64(val), true
-	case uint8:
-		return int64(val), true
-	case uint16:
-		return int64(val), true
-	case uint32:
-		return int64(val), true
-	case uint64:
-		return int64(val), true
-	case float32:
-		return int64(val), true
-	case float64:
-		return int64(val), true
-	default:
-		return 0, false
-	}
-}
-
-// toUint64 converts a value to uint64.
-func (c *Client) toUint64(v interface{}) (uint64, bool) {
-	switch val := v.(type) {
-	case int:
-		return uint64(val), true
-	case int8:
-		return uint64(val), true
-	case int16:
-		return uint64(val), true
-	case int32:
-		return uint64(val), true
-	case int64:
-		return uint64(val), true
-	case uint:
-		return uint64(val), true
-	case uint8:
-		return uint64(val), true
-	case uint16:
-		return uint64(val), true
-	case uint32:
-		return uint64(val), true
-	case uint64:
-		return val, true
-	case float32:
-		return uint64(val), true
-	case float64:
-		return uint64(val), true
-	default:
-		return 0, false
-	}
-}
-
-// toFloat64 converts a value to float64.
-func (c *Client) toFloat64(v interface{}) (float64, bool) {
-	switch val := v.(type) {
-	case int:
-		return float64(val), true
-	case int8:
-		return float64(val), true
-	case int16:
-		return float64(val), true
-	case int32:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case uint:
-		return float64(val), true
-	case uint8:
-		return float64(val), true
-	case uint16:
-		return float64(val), true
-	case uint32:
-		return float64(val), true
-	case uint64:
-		return float64(val), true
-	case float32:
-		return float64(val), true
-	case float64:
-		return val, true
-	default:
-		return 0, false
-	}
-}
-
-// GetStats returns the client statistics.
-func (c *Client) GetStats() map[string]uint64 {
-	return map[string]uint64{
-		"read_count":       c.stats.ReadCount.Load(),
-		"write_count":      c.stats.WriteCount.Load(),
-		"error_count":      c.stats.ErrorCount.Load(),
-		"retry_count":      c.stats.RetryCount.Load(),
-		"total_read_ns":    uint64(c.stats.TotalReadTime.Load()),
-		"total_write_ns":   uint64(c.stats.TotalWriteTime.Load()),
-	}
-}
-
-// GetStatsStruct returns the raw stats struct for direct access.
-func (c *Client) GetStatsStruct() *ClientStats {
-	return c.stats
-}
-
-// LastUsed returns when the client was last used.
-func (c *Client) LastUsed() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastUsed
-}
-
-// DeviceID returns the device ID this client is connected to.
-func (c *Client) DeviceID() string {
-	return c.deviceID
-}
-

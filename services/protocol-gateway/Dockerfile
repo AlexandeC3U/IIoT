@@ -26,14 +26,17 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 FROM alpine:3.19
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata docker-cli
 
 # Create non-root user
 RUN addgroup -g 1000 gateway && \
     adduser -u 1000 -G gateway -s /bin/sh -D gateway
 
+# Optional: allow access to /var/run/docker.sock when mounted (common gid=999)
+RUN addgroup -g 999 docker || true && addgroup gateway docker || true
+
 # Create necessary directories
-RUN mkdir -p /app/config && chown -R gateway:gateway /app
+RUN mkdir -p /app/config /app/certs/pki && chown -R gateway:gateway /app
 
 WORKDIR /app
 
@@ -42,6 +45,8 @@ COPY --from=builder /build/protocol-gateway /app/
 
 # Copy default config
 COPY --from=builder /build/config/* /app/config/
+
+# Note: Embedded web UI removed - use separate web-ui service
 
 # Use non-root user
 USER gateway

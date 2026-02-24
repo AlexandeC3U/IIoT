@@ -22,6 +22,9 @@ type Config struct {
 	// HTTP server configuration
 	HTTP HTTPConfig `mapstructure:"http"`
 
+	// API configuration (authentication, rate limiting, etc.)
+	API APIConfig `mapstructure:"api"`
+
 	// MQTT configuration
 	MQTT MQTTConfig `mapstructure:"mqtt"`
 
@@ -39,6 +42,9 @@ type Config struct {
 
 	// Logging configuration
 	Logging LoggingConfig `mapstructure:"logging"`
+
+	// NTP clock drift monitoring configuration
+	NTP NTPConfig `mapstructure:"ntp"`
 }
 
 // HTTPConfig holds HTTP server configuration.
@@ -47,6 +53,23 @@ type HTTPConfig struct {
 	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout time.Duration `mapstructure:"write_timeout"`
 	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+}
+
+// APIConfig holds API security and rate limiting configuration.
+type APIConfig struct {
+	// AuthEnabled enables API key authentication for protected endpoints
+	AuthEnabled bool `mapstructure:"auth_enabled"`
+
+	// APIKey is the secret key required for authenticated endpoints
+	// In production, use a strong, randomly generated key
+	APIKey string `mapstructure:"api_key"`
+
+	// MaxRequestBodySize is the maximum allowed request body size in bytes
+	// Default: 1MB. Set to 0 to disable limit (not recommended).
+	MaxRequestBodySize int64 `mapstructure:"max_request_body_size"`
+
+	// AllowedOrigins for CORS. Use "*" to allow all (not recommended for production)
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 // MQTTConfig holds MQTT client configuration.
@@ -89,6 +112,11 @@ type OPCUAConfig struct {
 	DefaultSecurityPolicy string        `mapstructure:"default_security_policy"`
 	DefaultSecurityMode   string        `mapstructure:"default_security_mode"`
 	DefaultAuthMode       string        `mapstructure:"default_auth_mode"`
+
+	// Certificate Trust Store Management
+	TrustStorePath    string        `mapstructure:"trust_store_path"`    // Path to PKI directory (default: ./pki)
+	AutoTrust         bool          `mapstructure:"auto_trust"`          // Auto-accept untrusted certs (dev only!)
+	CertCheckInterval time.Duration `mapstructure:"cert_check_interval"` // How often to check cert expiry (default: 1h)
 }
 
 // S7Config holds S7 connection pool configuration.
@@ -99,6 +127,11 @@ type S7Config struct {
 	ConnectionTimeout time.Duration `mapstructure:"connection_timeout"`
 	RetryAttempts     int           `mapstructure:"retry_attempts"`
 	RetryDelay        time.Duration `mapstructure:"retry_delay"`
+	// Circuit breaker configuration
+	CBMaxRequests      uint32        `mapstructure:"cb_max_requests"`
+	CBInterval         time.Duration `mapstructure:"cb_interval"`
+	CBTimeout          time.Duration `mapstructure:"cb_timeout"`
+	CBFailureThreshold uint32        `mapstructure:"cb_failure_threshold"`
 }
 
 // PollingConfig holds polling service configuration.
@@ -116,6 +149,20 @@ type LoggingConfig struct {
 	Format     string `mapstructure:"format"` // json or console
 	Output     string `mapstructure:"output"` // stdout, stderr, or file path
 	TimeFormat string `mapstructure:"time_format"`
+}
+
+// NTPConfig holds NTP clock drift monitoring configuration.
+type NTPConfig struct {
+	// Enabled enables periodic NTP clock drift checks (default: true)
+	Enabled bool `mapstructure:"enabled"`
+	// Server is the NTP server to query (default: "pool.ntp.org")
+	Server string `mapstructure:"server"`
+	// CheckInterval is how often to query the NTP server (default: 5m)
+	CheckInterval time.Duration `mapstructure:"check_interval"`
+	// WarnThreshold triggers a warning log if drift exceeds this (default: 500ms)
+	WarnThreshold time.Duration `mapstructure:"warn_threshold"`
+	// CritThreshold fails the health check if drift exceeds this (default: 2s)
+	CritThreshold time.Duration `mapstructure:"crit_threshold"`
 }
 
 // Load loads configuration from files and environment variables.
@@ -173,6 +220,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("http.write_timeout", 10*time.Second)
 	v.SetDefault("http.idle_timeout", 60*time.Second)
 
+	// API security
+	v.SetDefault("api.auth_enabled", false)
+	v.SetDefault("api.api_key", "")
+	v.SetDefault("api.max_request_body_size", 1048576) // 1MB default
+	v.SetDefault("api.allowed_origins", []string{})
+
 	// MQTT
 	v.SetDefault("mqtt.broker_url", "tcp://localhost:1883")
 	v.SetDefault("mqtt.client_id", "protocol-gateway")
@@ -202,6 +255,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("opcua.default_security_policy", "None")
 	v.SetDefault("opcua.default_security_mode", "None")
 	v.SetDefault("opcua.default_auth_mode", "Anonymous")
+	v.SetDefault("opcua.trust_store_path", "./pki")
+	v.SetDefault("opcua.auto_trust", false)
+	v.SetDefault("opcua.cert_check_interval", 1*time.Hour)
 
 	// S7
 	v.SetDefault("s7.max_connections", 100)
@@ -209,7 +265,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("s7.health_check_period", 30*time.Second)
 	v.SetDefault("s7.connection_timeout", 10*time.Second)
 	v.SetDefault("s7.retry_attempts", 3)
-	v.SetDefault("s7.retry_delay", 500*time.Millisecond)
+	v.SetDefault("s7.retry_delay", 5*time.Second)
+	// S7 circuit breaker defaults
+	v.SetDefault("s7.cb_max_requests", 3)
+	v.SetDefault("s7.cb_interval", 10*time.Second)
+	v.SetDefault("s7.cb_timeout", 30*time.Second)
+	v.SetDefault("s7.cb_failure_threshold", 5)
 
 	// Polling
 	v.SetDefault("polling.worker_count", 10)
@@ -223,6 +284,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logging.format", "json")
 	v.SetDefault("logging.output", "stdout")
 	v.SetDefault("logging.time_format", time.RFC3339)
+
+	// NTP clock drift monitoring
+	v.SetDefault("ntp.enabled", true)
+	v.SetDefault("ntp.server", "pool.ntp.org")
+	v.SetDefault("ntp.check_interval", 5*time.Minute)
+	v.SetDefault("ntp.warn_threshold", 500*time.Millisecond)
+	v.SetDefault("ntp.crit_threshold", 2*time.Second)
 }
 
 // bindEnvVars binds environment variables to config keys.
@@ -239,6 +307,11 @@ func bindEnvVars(v *viper.Viper) {
 
 	// HTTP
 	_ = v.BindEnv("http.port", "HTTP_PORT")
+
+	// API security
+	_ = v.BindEnv("api.auth_enabled", "API_AUTH_ENABLED")
+	_ = v.BindEnv("api.api_key", "API_KEY")
+	_ = v.BindEnv("api.max_request_body_size", "API_MAX_REQUEST_BODY_SIZE")
 
 	// Logging
 	_ = v.BindEnv("logging.level", "LOG_LEVEL")
@@ -269,4 +342,3 @@ func (c *Config) Validate() error {
 
 	return nil
 }
-

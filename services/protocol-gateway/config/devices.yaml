@@ -1,395 +1,56 @@
-# Protocol Gateway Device Configuration
-# This file defines all devices and their tags to be polled by the gateway.
-#
-# Supported protocols: modbus-tcp, modbus-rtu, opcua, s7
-
+version: "1.0"
 devices:
-  # ========================================
-  # MODBUS TCP EXAMPLE
-  # ========================================
-  - id: modbus-sensor-001
-    name: "Temperature/Humidity Sensor"
-    description: "Modbus TCP sensor on production line 1"
-    protocol: modbus-tcp
-    connection:
-      host: 192.168.1.100
-      port: 502
-      slave_id: 1
-      timeout: 5s
-      retry_count: 3
-      retry_delay: 100ms
-    uns_prefix: plant-a/line-1/sensors/temp-humidity-001
-    poll_interval: 1s
-    enabled: true
-    tags:
-      - id: temperature
-        name: "Temperature"
-        description: "Ambient temperature in Celsius"
-        address: 0
-        register_type: holding_register
-        data_type: int16
-        scale_factor: 0.1
-        offset: 0
-        unit: "°C"
-        topic_suffix: temperature
-        enabled: true
-        access_mode: read
-
-      - id: humidity
-        name: "Humidity"
-        description: "Relative humidity percentage"
-        address: 1
-        register_type: holding_register
-        data_type: int16
-        scale_factor: 0.1
-        offset: 0
-        unit: "%"
-        topic_suffix: humidity
-        enabled: true
-        access_mode: read
-
-      - id: setpoint
-        name: "Temperature Setpoint"
-        description: "Target temperature setpoint"
-        address: 10
-        register_type: holding_register
-        data_type: int16
-        scale_factor: 0.1
-        offset: 0
-        unit: "°C"
-        topic_suffix: setpoint
-        enabled: true
-        access_mode: readwrite
-
-  # ========================================
-  # MODBUS TCP - VFD / Motor Drive
-  # (with rate limiting example)
-  # ========================================
-  - id: modbus-vfd-001
-    name: "Variable Frequency Drive"
-    description: "ABB VFD controlling conveyor motor"
-    protocol: modbus-tcp
-    connection:
-      host: 192.168.1.101
-      port: 502
-      slave_id: 1
-      timeout: 5s
-      retry_count: 3
-      retry_delay: 100ms
-    uns_prefix: plant-a/line-1/drives/vfd-001
-    poll_interval: 500ms
-    enabled: true
-    # Rate limiting protects devices from being overwhelmed
-    # Useful for sensitive devices or when poll_interval is very short
-    rate_limiting:
+    - id: device-001
+      name: Demo
+      protocol: opcua
       enabled: true
-      min_interval: 200ms        # Minimum 200ms between requests
-      # max_requests_per_second: 5   # Alternative: limit to 5 req/sec
-      burst_size: 2              # Allow up to 2 requests in quick succession
-      skip_on_limit: true        # Skip polls when limit hit (vs. waiting)
-    tags:
-      - id: speed
-        name: "Motor Speed"
-        address: 100
-        register_type: holding_register
-        data_type: uint16
-        scale_factor: 1.0
-        unit: "rpm"
-        topic_suffix: speed
-        enabled: true
-
-      - id: current
-        name: "Motor Current"
-        address: 101
-        register_type: holding_register
-        data_type: uint16
-        scale_factor: 0.1
-        unit: "A"
-        topic_suffix: current
-        enabled: true
-
-      - id: frequency
-        name: "Output Frequency"
-        address: 102
-        register_type: holding_register
-        data_type: uint16
-        scale_factor: 0.1
-        unit: "Hz"
-        topic_suffix: frequency
-        enabled: true
-
-      - id: speed-setpoint
-        name: "Speed Setpoint"
-        address: 200
-        register_type: holding_register
-        data_type: uint16
-        scale_factor: 1.0
-        unit: "rpm"
-        topic_suffix: speed-setpoint
-        enabled: true
-        access_mode: readwrite
-
-      - id: run-command
-        name: "Run Command"
-        address: 0
-        register_type: coil
-        data_type: bool
-        topic_suffix: run-command
-        enabled: true
-        access_mode: readwrite
-
-  # ========================================
-  # OPC UA EXAMPLE
-  # ========================================
-  - id: opcua-server-001
-    name: "Production Line PLC (OPC UA)"
-    description: "Beckhoff TwinCAT PLC with OPC UA server"
-    protocol: opcua
-    connection:
-      opc_endpoint_url: opc.tcp://192.168.1.50:4840
-      opc_security_policy: None
-      opc_security_mode: None
-      opc_auth_mode: Anonymous
-      timeout: 10s
-      retry_count: 3
-      retry_delay: 500ms
-    uns_prefix: plant-a/line-1/plc/beckhoff-001
-    poll_interval: 250ms
-    enabled: true
-    tags:
-      - id: production-count
-        name: "Production Count"
-        opc_node_id: "ns=2;s=GVL.ProductionCount"
-        data_type: uint32
-        topic_suffix: production/count
-        enabled: true
-        access_mode: read
-
-      - id: cycle-time
-        name: "Cycle Time"
-        opc_node_id: "ns=2;s=GVL.CycleTime"
-        data_type: float32
-        unit: "ms"
-        topic_suffix: production/cycle-time
-        enabled: true
-
-      - id: machine-state
-        name: "Machine State"
-        opc_node_id: "ns=2;s=GVL.MachineState"
-        data_type: int16
-        topic_suffix: status/state
-        enabled: true
-
-      - id: temperature-zone1
-        name: "Temperature Zone 1"
-        opc_node_id: "ns=2;s=GVL.TempZone1"
-        data_type: float32
-        unit: "°C"
-        topic_suffix: temperature/zone1
-        enabled: true
-
-      - id: temperature-setpoint-zone1
-        name: "Temperature Setpoint Zone 1"
-        opc_node_id: "ns=2;s=GVL.TempSetpointZone1"
-        data_type: float32
-        unit: "°C"
-        topic_suffix: temperature/setpoint-zone1
-        enabled: true
-        access_mode: readwrite
-
-      - id: alarm-active
-        name: "Alarm Active"
-        opc_node_id: "ns=2;s=GVL.AlarmActive"
-        data_type: bool
-        topic_suffix: alarms/active
-        enabled: true
-
-      - id: alarm-reset
-        name: "Alarm Reset"
-        opc_node_id: "ns=2;s=GVL.AlarmReset"
-        data_type: bool
-        topic_suffix: alarms/reset
-        enabled: true
-        access_mode: readwrite
-
-  # ========================================
-  # SIEMENS S7 EXAMPLE
-  # ========================================
-  - id: s7-plc-001
-    name: "Siemens S7-1500 Main PLC"
-    description: "Main production control PLC"
-    protocol: s7
-    connection:
-      host: 192.168.1.10
-      port: 102
-      s7_rack: 0
-      s7_slot: 1
-      timeout: 10s
-      retry_count: 3
-      retry_delay: 500ms
-    uns_prefix: plant-a/line-1/plc/s7-main
-    poll_interval: 100ms
-    enabled: true
-    tags:
-      # Data Block tags
-      - id: motor-speed
-        name: "Motor Speed"
-        s7_address: "DB1.DBD0"
-        data_type: float32
-        scale_factor: 1.0
-        unit: "rpm"
-        topic_suffix: motor/speed
-        enabled: true
-        access_mode: readwrite
-
-      - id: conveyor-speed
-        name: "Conveyor Speed"
-        s7_address: "DB1.DBD4"
-        data_type: float32
-        unit: "m/min"
-        topic_suffix: conveyor/speed
-        enabled: true
-
-      - id: tank-level
-        name: "Tank Level"
-        s7_address: "DB1.DBD8"
-        data_type: float32
-        unit: "%"
-        topic_suffix: tank/level
-        enabled: true
-
-      - id: tank-temperature
-        name: "Tank Temperature"
-        s7_address: "DB1.DBD12"
-        data_type: float32
-        scale_factor: 0.1
-        unit: "°C"
-        topic_suffix: tank/temperature
-        enabled: true
-
-      - id: production-counter
-        name: "Production Counter"
-        s7_address: "DB1.DBD16"
-        data_type: uint32
-        topic_suffix: production/counter
-        enabled: true
-
-      # Merker (Flag) tags
-      - id: auto-mode
-        name: "Automatic Mode"
-        s7_address: "M0.0"
-        data_type: bool
-        topic_suffix: mode/auto
-        enabled: true
-
-      - id: manual-mode
-        name: "Manual Mode"
-        s7_address: "M0.1"
-        data_type: bool
-        topic_suffix: mode/manual
-        enabled: true
-
-      # Input tags (read-only)
-      - id: emergency-stop
-        name: "Emergency Stop"
-        s7_address: "I0.0"
-        data_type: bool
-        topic_suffix: safety/estop
-        enabled: true
-
-      - id: door-closed
-        name: "Safety Door Closed"
-        s7_address: "I0.1"
-        data_type: bool
-        topic_suffix: safety/door-closed
-        enabled: true
-
-      - id: sensor-presence
-        name: "Part Presence Sensor"
-        s7_address: "I1.0"
-        data_type: bool
-        topic_suffix: sensors/part-presence
-        enabled: true
-
-      # Output tags (read/write)
-      - id: conveyor-run
-        name: "Conveyor Run"
-        s7_address: "Q0.0"
-        data_type: bool
-        topic_suffix: conveyor/run
-        enabled: true
-        access_mode: readwrite
-
-      - id: pump-run
-        name: "Pump Run"
-        s7_address: "Q0.1"
-        data_type: bool
-        topic_suffix: pump/run
-        enabled: true
-        access_mode: readwrite
-
-      - id: alarm-lamp
-        name: "Alarm Lamp"
-        s7_address: "Q0.2"
-        data_type: bool
-        topic_suffix: indicators/alarm-lamp
-        enabled: true
-
-  # ========================================
-  # SIEMENS S7-300 EXAMPLE (Legacy)
-  # ========================================
-  - id: s7-plc-002
-    name: "Siemens S7-300 Packaging"
-    description: "Packaging machine PLC"
-    protocol: s7
-    connection:
-      host: 192.168.1.11
-      port: 102
-      s7_rack: 0
-      s7_slot: 2
-      timeout: 10s
-      retry_count: 3
-      retry_delay: 500ms
-    uns_prefix: plant-a/line-1/plc/s7-packaging
-    poll_interval: 200ms
-    enabled: true
-    tags:
-      - id: bags-per-minute
-        name: "Bags Per Minute"
-        s7_address: "DB10.DBW0"
-        data_type: int16
-        unit: "bags/min"
-        topic_suffix: production/rate
-        enabled: true
-
-      - id: total-bags
-        name: "Total Bags Produced"
-        s7_address: "DB10.DBD2"
-        data_type: uint32
-        topic_suffix: production/total
-        enabled: true
-
-      - id: film-tension
-        name: "Film Tension"
-        s7_address: "DB10.DBD6"
-        data_type: float32
-        unit: "N"
-        topic_suffix: film/tension
-        enabled: true
-
-      - id: sealing-temperature
-        name: "Sealing Temperature"
-        s7_address: "DB10.DBD10"
-        data_type: float32
-        unit: "°C"
-        topic_suffix: sealing/temperature
-        enabled: true
-
-      - id: sealing-setpoint
-        name: "Sealing Temperature Setpoint"
-        s7_address: "DB10.DBD14"
-        data_type: float32
-        unit: "°C"
-        topic_suffix: sealing/setpoint
-        enabled: true
-        access_mode: readwrite
+      uns_prefix: plant1/area1/line2
+      poll_interval: 10s
+      connection:
+        host: nexus-opcua-sim
+        port: 4840
+        timeout: 5s
+        retry_count: 3
+        retry_delay: 100ms
+        slave_id: 1
+        opc_endpoint_url: opc.tcp://nexus-opcua-sim:4840
+        opc_security_policy: None
+        opc_security_mode: ""
+        opc_auth_mode: ""
+        opc_username: ""
+        opc_password: ""
+        opc_cert_file: ""
+        opc_key_file: ""
+        opc_server_cert_file: ""
+        opc_insecure_skip_verify: false
+        opc_auto_select_endpoint: false
+        opc_application_name: ""
+        opc_application_uri: ""
+        opc_use_subscriptions: false
+        opc_publish_interval: ""
+        opc_sampling_interval: ""
+        s7_rack: 0
+        s7_slot: 0
+      tags:
+        - id: tag-1771836635977
+          name: Switch
+          data_type: bool
+          scale_factor: 1
+          topic_suffix: Switch
+          enabled: true
+          access_mode: readwrite
+          register_type: holding_register
+          byte_order: big_endian
+          register_count: 1
+          opc_node_id: ns=2;s=Demo.Switch
+        - id: tag-1771861039471
+          name: Temperature
+          data_type: float64
+          scale_factor: 1
+          topic_suffix: Temperature
+          enabled: true
+          access_mode: read
+          register_type: holding_register
+          byte_order: big_endian
+          register_count: 1
+          opc_node_id: ns=2;s=Demo.Temperature

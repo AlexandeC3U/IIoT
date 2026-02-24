@@ -1,4 +1,8 @@
 # Protocol Gateway - Kustomization
+# NOTE: Uses StatefulSet (not Deployment) because protocol gateway:
+#   - Maintains long-lived TCP connections to industrial devices
+#   - Cannot horizontally scale (would cause duplicate PLC connections)
+#   - Needs persistent storage for OPC UA PKI trust store
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -6,9 +10,9 @@ namespace: nexus
 
 resources:
   - serviceaccount.yaml
-  - deployment.yaml
+  - statefulset.yaml       # Changed from deployment.yaml
   - service.yaml
-  - hpa.yaml
+  # - hpa.yaml             # Removed: HPA not applicable for single-replica stateful service
   - pdb.yaml
   - devices-configmap.yaml
 

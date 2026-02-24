@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,17 @@ type Publisher struct {
 	done          chan struct{}
 	wg            sync.WaitGroup
 	stats         *PublisherStats
+	topicMu       sync.RWMutex
+	topicStats    map[string]*TopicStat
+}
+
+// TopicStat tracks publish activity for a given topic.
+// Used for the Web UI "Active Topics" view.
+type TopicStat struct {
+	Topic            string    `json:"topic"`
+	Count            uint64    `json:"count"`
+	LastPublished    time.Time `json:"last_published"`
+	LastPayloadBytes int       `json:"last_payload_bytes"`
 }
 
 // Config holds MQTT publisher configuration.
@@ -115,9 +127,89 @@ func NewPublisher(config Config, logger zerolog.Logger, metricsReg *metrics.Regi
 		messageBuffer: make(chan *BufferedMessage, config.BufferSize),
 		done:          make(chan struct{}),
 		stats:         &PublisherStats{},
+		topicStats:    make(map[string]*TopicStat),
 	}
 
 	return p, nil
+}
+
+// ActiveTopics returns the most recently published topics, sorted by recency.
+// If limit <= 0, a default limit of 200 is used.
+func (p *Publisher) ActiveTopics(limit int) []TopicStat {
+	if limit <= 0 {
+		limit = 200
+	}
+
+	p.topicMu.RLock()
+	out := make([]TopicStat, 0, len(p.topicStats))
+	for _, stat := range p.topicStats {
+		out = append(out, *stat)
+	}
+	p.topicMu.RUnlock()
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].LastPublished.After(out[j].LastPublished)
+	})
+
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func (p *Publisher) recordTopicPublish(topic string, payloadBytes int) {
+	now := time.Now()
+
+	p.topicMu.Lock()
+	defer p.topicMu.Unlock()
+
+	stat, ok := p.topicStats[topic]
+	if !ok {
+		// Limit the number of tracked topics to prevent unbounded memory growth
+		// If we have too many topics, evict the oldest ones
+		const maxTrackedTopics = 10000
+		if len(p.topicStats) >= maxTrackedTopics {
+			p.evictOldestTopicsLocked(maxTrackedTopics / 10) // Evict 10%
+		}
+		stat = &TopicStat{Topic: topic}
+		p.topicStats[topic] = stat
+	}
+	stat.Count++
+	stat.LastPublished = now
+	stat.LastPayloadBytes = payloadBytes
+}
+
+// evictOldestTopicsLocked removes the N oldest topics from the stats map.
+// Must be called with topicMu held.
+func (p *Publisher) evictOldestTopicsLocked(count int) {
+	if count <= 0 || len(p.topicStats) == 0 {
+		return
+	}
+
+	// Build list of topics with their last publish time
+	type topicAge struct {
+		topic string
+		time  time.Time
+	}
+	topics := make([]topicAge, 0, len(p.topicStats))
+	for topic, stat := range p.topicStats {
+		topics = append(topics, topicAge{topic: topic, time: stat.LastPublished})
+	}
+
+	// Sort by age (oldest first)
+	sort.Slice(topics, func(i, j int) bool {
+		return topics[i].time.Before(topics[j].time)
+	})
+
+	// Delete the oldest entries
+	if count > len(topics) {
+		count = len(topics)
+	}
+	for i := 0; i < count; i++ {
+		delete(p.topicStats, topics[i].topic)
+	}
+
+	p.logger.Debug().Int("evicted", count).Int("remaining", len(p.topicStats)).Msg("Evicted old topic stats")
 }
 
 // Connect establishes the connection to the MQTT broker.
@@ -176,6 +268,12 @@ func (p *Publisher) Connect(ctx context.Context) error {
 		return fmt.Errorf("%w: %v", domain.ErrMQTTConnectionFailed, ctx.Err())
 	}
 
+	// Ensure connected state is set (callback might not have fired yet)
+	p.connected.Store(true)
+
+	// Reinitialize done channel for reconnection support
+	p.done = make(chan struct{})
+
 	// Start buffer processor
 	p.wg.Add(1)
 	go p.processBuffer()
@@ -188,8 +286,13 @@ func (p *Publisher) Connect(ctx context.Context) error {
 func (p *Publisher) Disconnect() {
 	p.logger.Info().Msg("Disconnecting from MQTT broker")
 
-	// Signal buffer processor to stop
-	close(p.done)
+	// Signal buffer processor to stop (safe close)
+	select {
+	case <-p.done:
+		// Already closed
+	default:
+		close(p.done)
+	}
 	p.wg.Wait()
 
 	// Disconnect client
@@ -244,6 +347,7 @@ func (p *Publisher) publishRaw(ctx context.Context, topic string, payload []byte
 	token := client.Publish(topic, qos, retained, payload)
 
 	// Wait for publish with context
+	publishStart := time.Now()
 	publishDone := make(chan bool, 1)
 	go func() {
 		publishDone <- token.WaitTimeout(p.config.PublishTimeout)
@@ -251,21 +355,38 @@ func (p *Publisher) publishRaw(ctx context.Context, topic string, payload []byte
 
 	select {
 	case success := <-publishDone:
+		latency := time.Since(publishStart)
 		if !success {
 			p.stats.MessagesFailed.Add(1)
+			if p.metrics != nil {
+				p.metrics.RecordMQTTPublish(false, latency.Seconds())
+			}
 			return fmt.Errorf("%w: publish timeout", domain.ErrMQTTPublishFailed)
 		}
 		if token.Error() != nil {
 			p.stats.MessagesFailed.Add(1)
+			if p.metrics != nil {
+				p.metrics.RecordMQTTPublish(false, latency.Seconds())
+			}
 			return fmt.Errorf("%w: %v", domain.ErrMQTTPublishFailed, token.Error())
 		}
 	case <-ctx.Done():
+		latency := time.Since(publishStart)
 		p.stats.MessagesFailed.Add(1)
+		if p.metrics != nil {
+			p.metrics.RecordMQTTPublish(false, latency.Seconds())
+		}
 		return fmt.Errorf("%w: %v", domain.ErrMQTTPublishFailed, ctx.Err())
 	}
 
 	p.stats.MessagesPublished.Add(1)
 	p.stats.BytesSent.Add(uint64(len(payload)))
+	p.recordTopicPublish(topic, len(payload))
+
+	// Record Prometheus metrics with actual measured latency
+	if p.metrics != nil {
+		p.metrics.RecordMQTTPublish(true, time.Since(publishStart).Seconds())
+	}
 
 	return nil
 }
@@ -288,6 +409,9 @@ func (p *Publisher) bufferMessage(dataPoint *domain.DataPoint) error {
 	select {
 	case p.messageBuffer <- msg:
 		p.stats.MessagesBuffered.Add(1)
+		if p.metrics != nil {
+			p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
+		}
 		return nil
 	default:
 		// Buffer full, drop oldest message
@@ -295,6 +419,9 @@ func (p *Publisher) bufferMessage(dataPoint *domain.DataPoint) error {
 		case <-p.messageBuffer:
 			p.messageBuffer <- msg
 			p.logger.Warn().Msg("Buffer full, dropped oldest message")
+			if p.metrics != nil {
+				p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
+			}
 			return nil
 		default:
 			return fmt.Errorf("message buffer full")
@@ -305,6 +432,9 @@ func (p *Publisher) bufferMessage(dataPoint *domain.DataPoint) error {
 // processBuffer processes buffered messages when connected.
 func (p *Publisher) processBuffer() {
 	defer p.wg.Done()
+
+	backoff := 100 * time.Millisecond
+	maxBackoff := 5 * time.Second
 
 	for {
 		select {
@@ -320,22 +450,46 @@ func (p *Publisher) processBuffer() {
 					p.logger.Warn().Err(err).Str("topic", msg.Topic).Msg("Failed to publish buffered message")
 				}
 				cancel()
+				backoff = 100 * time.Millisecond // Reset backoff on success
+				// Update buffer size metric after draining
+				if p.metrics != nil {
+					p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
+				}
 			} else {
-				// Re-buffer if not connected
+				// Re-buffer if not connected (non-blocking to avoid deadlock)
 				select {
 				case p.messageBuffer <- msg:
 				default:
 					// Buffer still full, drop message
+					p.logger.Debug().Str("topic", msg.Topic).Msg("Dropped message: buffer full while disconnected")
 				}
-				time.Sleep(100 * time.Millisecond)
+				// Exponential backoff to prevent spin-loop when disconnected
+				select {
+				case <-p.done:
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < maxBackoff {
+					backoff *= 2
+				}
 			}
 		}
 	}
 }
 
 // drainBuffer attempts to publish all remaining buffered messages.
+// Timeout scales with buffer size: base 10s + 1ms per message, capped at 60s.
 func (p *Publisher) drainBuffer() {
-	timeout := time.After(5 * time.Second)
+	bufferLen := len(p.messageBuffer)
+	drainTimeout := 10*time.Second + time.Duration(bufferLen)*time.Millisecond
+	if drainTimeout > 60*time.Second {
+		drainTimeout = 60 * time.Second
+	}
+
+	p.logger.Debug().Int("buffered", bufferLen).Dur("timeout", drainTimeout).Msg("Draining message buffer")
+
+	timeout := time.After(drainTimeout)
+	drained := 0
 	for {
 		select {
 		case msg := <-p.messageBuffer:
@@ -343,16 +497,35 @@ func (p *Publisher) drainBuffer() {
 				ctx, cancel := context.WithTimeout(context.Background(), p.config.PublishTimeout)
 				if err := p.publishRaw(ctx, msg.Topic, msg.Payload, msg.QoS, msg.Retained); err != nil {
 					p.logger.Warn().Err(err).Str("topic", msg.Topic).Msg("Failed to drain buffered message")
+				} else {
+					drained++
 				}
 				cancel()
+			}
+			// Update buffer size metric during drain
+			if p.metrics != nil {
+				p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
 			}
 		case <-timeout:
 			remaining := len(p.messageBuffer)
 			if remaining > 0 {
-				p.logger.Warn().Int("count", remaining).Msg("Timeout draining buffer, messages dropped")
+				p.logger.Warn().Int("drained", drained).Int("dropped", remaining).Msg("Timeout draining buffer, messages dropped")
+			} else if drained > 0 {
+				p.logger.Info().Int("drained", drained).Msg("Buffer drained successfully")
+			}
+			// Final buffer size update
+			if p.metrics != nil {
+				p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
 			}
 			return
 		default:
+			if drained > 0 {
+				p.logger.Debug().Int("drained", drained).Msg("Buffer drained")
+			}
+			// Final buffer size update
+			if p.metrics != nil {
+				p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
+			}
 			return
 		}
 	}
@@ -450,4 +623,3 @@ func (p *Publisher) Client() pahomqtt.Client {
 	defer p.mu.RUnlock()
 	return p.client
 }
-

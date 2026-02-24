@@ -47,6 +47,8 @@ var (
 	ErrModbusMemoryParityError      = errors.New("modbus: memory parity error")
 	ErrModbusGatewayPathUnavailable = errors.New("modbus: gateway path unavailable")
 	ErrModbusGatewayTargetFailed    = errors.New("modbus: gateway target device failed to respond")
+	ErrModbusProtocolLimit          = errors.New("modbus: protocol limit exceeded")
+	ErrInvalidRegisterCount         = errors.New("modbus: invalid register count")
 )
 
 // MQTT errors.
@@ -68,7 +70,6 @@ var (
 	ErrOPCUANodeNotFound       = errors.New("opcua: node not found")
 	ErrOPCUAAccessDenied       = errors.New("opcua: access denied")
 	ErrOPCUAWriteNotPermitted  = errors.New("opcua: write not permitted")
-	ErrOPCUASessionLimit       = errors.New("opcua: server at session limit, in extended backoff")
 )
 
 // S7 (Siemens) specific errors.
@@ -101,6 +102,7 @@ var (
 var (
 	ErrServiceNotStarted    = errors.New("service not started")
 	ErrServiceStopped       = errors.New("service has been stopped")
+	ErrServiceOverloaded    = errors.New("service overloaded - brownout mode active")
 	ErrDeviceNotFound       = errors.New("device not found")
 	ErrDeviceExists         = errors.New("device already exists")
 	ErrTagNotFound          = errors.New("tag not found")

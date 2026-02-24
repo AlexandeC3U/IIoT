@@ -4,85 +4,16 @@ package s7
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nexus-edge/protocol-gateway/internal/domain"
 	"github.com/robinson/gos7"
 	"github.com/rs/zerolog"
 )
-
-// Client represents an S7 client connection to a single PLC.
-type Client struct {
-	config     ClientConfig
-	handler    *gos7.TCPClientHandler
-	client     gos7.Client
-	logger     zerolog.Logger
-	mu         sync.RWMutex
-	connected  atomic.Bool
-	lastError  error
-	lastUsed   time.Time
-	stats      *ClientStats
-	deviceID   string
-}
-
-// ClientConfig holds configuration for an S7 client.
-type ClientConfig struct {
-	// Address is the IP address of the PLC
-	Address string
-
-	// Port is the TCP port (default: 102 for ISO-on-TCP)
-	Port int
-
-	// Rack is the rack number of the PLC (usually 0)
-	Rack int
-
-	// Slot is the slot number of the CPU module
-	// S7-300/400: usually 2, S7-1200/1500: usually 0 or 1
-	Slot int
-
-	// Timeout is the connection and response timeout
-	Timeout time.Duration
-
-	// IdleTimeout is how long to keep idle connections open
-	IdleTimeout time.Duration
-
-	// MaxRetries is the number of retry attempts on transient failures
-	MaxRetries int
-
-	// RetryDelay is the base delay between retries (exponential backoff applied)
-	RetryDelay time.Duration
-
-	// PDUSize is the maximum PDU size (default: 480)
-	PDUSize int
-}
-
-// ClientStats tracks client performance metrics.
-type ClientStats struct {
-	ReadCount      atomic.Uint64
-	WriteCount     atomic.Uint64
-	ErrorCount     atomic.Uint64
-	RetryCount     atomic.Uint64
-	TotalReadTime  atomic.Int64 // nanoseconds
-	TotalWriteTime atomic.Int64 // nanoseconds
-}
-
-// S7AreaCode maps domain S7Area to gos7 area codes.
-var S7AreaCode = map[domain.S7Area]int{
-	domain.S7AreaDB: 0x84, // Data Blocks
-	domain.S7AreaM:  0x83, // Merkers
-	domain.S7AreaI:  0x81, // Inputs
-	domain.S7AreaQ:  0x82, // Outputs
-	domain.S7AreaT:  0x1D, // Timers
-	domain.S7AreaC:  0x1C, // Counters
-}
 
 // NewClient creates a new S7 client with the given configuration.
 func NewClient(deviceID string, config ClientConfig, logger zerolog.Logger) (*Client, error) {
@@ -111,11 +42,13 @@ func NewClient(deviceID string, config ClientConfig, logger zerolog.Logger) (*Cl
 	}
 
 	c := &Client{
-		config:   config,
-		logger:   logger.With().Str("device_id", deviceID).Str("address", config.Address).Logger(),
-		stats:    &ClientStats{},
-		deviceID: deviceID,
-		lastUsed: time.Now(),
+		config:         config,
+		batchConfig:    DefaultS7BatchConfig(),
+		logger:         logger.With().Str("device_id", deviceID).Str("address", config.Address).Logger(),
+		stats:          &ClientStats{},
+		deviceID:       deviceID,
+		lastUsed:       time.Now(),
+		tagDiagnostics: make(map[string]*TagDiagnostic),
 	}
 
 	return c, nil
@@ -150,10 +83,19 @@ func (c *Client) Connect(ctx context.Context) error {
 	select {
 	case err := <-connectDone:
 		if err != nil {
+			// Close handler to release resources on failure
+			handler.Close()
 			c.lastError = err
 			return fmt.Errorf("%w: %v", domain.ErrS7ConnectionFailed, err)
 		}
 	case <-ctx.Done():
+		// Context cancelled - close handler in background to prevent leak
+		// The Connect() goroutine may still be running, but handler.Close()
+		// will cause it to fail and return.
+		go func() {
+			<-connectDone // Wait for connect goroutine to finish
+			handler.Close()
+		}()
 		return fmt.Errorf("%w: %v", domain.ErrConnectionTimeout, ctx.Err())
 	}
 
@@ -205,6 +147,7 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 	c.mu.Unlock()
 
 	if !c.connected.Load() {
+		c.recordTagError(tag.ID, domain.ErrConnectionClosed)
 		return nil, domain.ErrConnectionClosed
 	}
 
@@ -212,6 +155,8 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 	area, dbNumber, offset, bitOffset, err := c.parseTagAddress(tag)
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.recordTagError(tag.ID, err)
+		c.consecutiveFailures.Add(1)
 		return c.createErrorDataPoint(tag, err), err
 	}
 
@@ -229,6 +174,7 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 
 			select {
 			case <-ctx.Done():
+				c.recordTagError(tag.ID, ctx.Err())
 				return nil, ctx.Err()
 			case <-time.After(delay):
 			}
@@ -242,6 +188,8 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 		// Check if error is retryable
 		if !c.isRetryableError(err) {
 			c.stats.ErrorCount.Add(1)
+			c.recordTagError(tag.ID, err)
+			c.consecutiveFailures.Add(1)
 			return c.createErrorDataPoint(tag, err), err
 		}
 
@@ -254,14 +202,21 @@ func (c *Client) ReadTag(ctx context.Context, tag *domain.Tag) (*domain.DataPoin
 
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.recordTagError(tag.ID, err)
+		c.consecutiveFailures.Add(1)
 		return c.createErrorDataPoint(tag, err), err
 	}
 
+	// Success - reset consecutive failures and record success
+	c.consecutiveFailures.Store(0)
+	c.recordTagSuccess(tag.ID)
 	c.stats.ReadCount.Add(1)
 	return dp, nil
 }
 
-// ReadTags reads multiple tags efficiently using batch reads where possible.
+// ReadTags reads multiple tags efficiently using address-based contiguous range merging.
+// Nearby tags in the same area/DB are merged into byte-range reads, reducing PDU item count.
+// Falls back to per-tag AGReadMulti on failure.
 func (c *Client) ReadTags(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
 	if len(tags) == 0 {
 		return nil, nil
@@ -275,27 +230,338 @@ func (c *Client) ReadTags(ctx context.Context, tags []*domain.Tag) ([]*domain.Da
 		return nil, domain.ErrConnectionClosed
 	}
 
-	// Group tags by area for batch reading
-	groups := c.groupTagsByArea(tags)
-	results := make([]*domain.DataPoint, 0, len(tags))
+	// Try optimized contiguous-range path first
+	results, err := c.readTagsOptimized(ctx, tags)
+	if err == nil {
+		return results, nil
+	}
 
-	for _, group := range groups {
-		for _, tag := range group {
-			select {
-			case <-ctx.Done():
-				return results, ctx.Err()
-			default:
-			}
+	c.logger.Warn().Err(err).Int("tag_count", len(tags)).
+		Msg("Optimized batch read failed, falling back to per-tag batch")
 
-			dp, err := c.ReadTag(ctx, tag)
-			if err != nil {
-				c.logger.Warn().Err(err).Str("tag", tag.ID).Msg("Failed to read tag")
-			}
-			results = append(results, dp)
+	// Fallback: original per-tag AGReadMulti path
+	return c.readTagsFallback(ctx, tags)
+}
+
+// readTagsOptimized merges nearby tags into contiguous byte ranges and reads each range
+// as a single AGReadMulti item, then extracts per-tag values from the range buffers.
+func (c *Client) readTagsOptimized(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
+	// Step 1: Parse all tags into s7ParsedTag structs
+	parsed := make([]s7ParsedTag, 0, len(tags))
+	for _, tag := range tags {
+		area, dbNumber, offset, bitOffset, err := c.parseTagAddress(tag)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse address for tag %s: %w", tag.ID, err)
+		}
+		byteCount := c.getByteCount(tag.DataType)
+		parsed = append(parsed, s7ParsedTag{
+			tag:       tag,
+			area:      area,
+			dbNumber:  dbNumber,
+			offset:    offset,
+			bitOffset: bitOffset,
+			byteCount: byteCount,
+		})
+	}
+
+	// Step 2: Merge into contiguous byte ranges
+	ranges := buildS7ContiguousRanges(parsed, c.batchConfig)
+
+	c.logger.Debug().
+		Int("tags", len(tags)).
+		Int("ranges", len(ranges)).
+		Msg("S7 batch: merged tags into contiguous ranges")
+
+	// Step 3: Process ranges in chunks of MaxMultiReadItems
+	// Build a tag-ID → result index map for ordered output
+	resultMap := make(map[string]*domain.DataPoint, len(tags))
+
+	for i := 0; i < len(ranges); i += MaxMultiReadItems {
+		end := i + MaxMultiReadItems
+		if end > len(ranges) {
+			end = len(ranges)
+		}
+		chunk := ranges[i:end]
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		if err := c.readContiguousRanges(chunk, resultMap); err != nil {
+			return nil, err
+		}
+	}
+
+	// Step 4: Assemble results in original tag order
+	results := make([]*domain.DataPoint, len(tags))
+	for i, tag := range tags {
+		dp, ok := resultMap[tag.ID]
+		if !ok {
+			results[i] = c.createErrorDataPoint(tag, fmt.Errorf("tag %s missing from batch result", tag.ID))
+		} else {
+			results[i] = dp
 		}
 	}
 
 	return results, nil
+}
+
+// readContiguousRanges reads a chunk of byte ranges via AGReadMulti and extracts per-tag values.
+func (c *Client) readContiguousRanges(ranges []s7ByteRange, resultMap map[string]*domain.DataPoint) error {
+	// Build AGReadMulti items — one per range, all using S7WLByte
+	dataItems := make([]gos7.S7DataItem, len(ranges))
+	for i, r := range ranges {
+		areaCode, ok := S7AreaCode[r.area]
+		if !ok {
+			return fmt.Errorf("%w: %s", domain.ErrS7InvalidArea, r.area)
+		}
+		dataItems[i] = gos7.S7DataItem{
+			Area:     areaCode,
+			WordLen:  S7WLByte,
+			DBNumber: r.dbNumber,
+			Start:    r.startOffset,
+			Bit:      0,
+			Amount:   r.totalBytes,
+			Data:     make([]byte, r.totalBytes),
+		}
+	}
+
+	// Serialize S7 operations
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return domain.ErrConnectionClosed
+	}
+
+	// Execute batch read
+	if err := client.AGReadMulti(dataItems, len(dataItems)); err != nil {
+		return fmt.Errorf("%w: AGReadMulti failed: %v", domain.ErrS7ReadFailed, err)
+	}
+
+	// Extract per-tag values from each range buffer
+	for i, r := range ranges {
+		item := dataItems[i]
+
+		// Check per-item error
+		if item.Error != "" {
+			for _, t := range r.tags {
+				c.stats.ErrorCount.Add(1)
+				c.recordTagError(t.tag.ID, fmt.Errorf(item.Error))
+				resultMap[t.tag.ID] = c.createErrorDataPoint(t.tag, fmt.Errorf(item.Error))
+			}
+			continue
+		}
+
+		// Extract each tag's value from the range buffer
+		for _, t := range r.tags {
+			if t.offset+t.byteCount > len(item.Data) {
+				c.stats.ErrorCount.Add(1)
+				err := fmt.Errorf("tag %s: offset %d + size %d exceeds buffer %d",
+					t.tag.ID, t.offset, t.byteCount, len(item.Data))
+				c.recordTagError(t.tag.ID, err)
+				resultMap[t.tag.ID] = c.createErrorDataPoint(t.tag, err)
+				continue
+			}
+
+			tagBytes := item.Data[t.offset : t.offset+t.byteCount]
+			value, parseErr := c.parseValue(tagBytes, t.tag, t.bitOffset)
+			if parseErr != nil {
+				c.stats.ErrorCount.Add(1)
+				c.recordTagError(t.tag.ID, parseErr)
+				resultMap[t.tag.ID] = c.createErrorDataPoint(t.tag, parseErr)
+				continue
+			}
+
+			scaledValue := c.applyScaling(value, t.tag)
+			dp := domain.AcquireDataPoint(
+				c.deviceID,
+				t.tag.ID,
+				"",
+				scaledValue,
+				t.tag.Unit,
+				domain.QualityGood,
+			).WithRawValue(value)
+
+			resultMap[t.tag.ID] = dp
+			c.stats.ReadCount.Add(1)
+			c.recordTagSuccess(t.tag.ID)
+		}
+	}
+
+	return nil
+}
+
+// readTagsFallback is the original per-tag AGReadMulti path, used when optimized batching fails.
+func (c *Client) readTagsFallback(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
+	results := make([]*domain.DataPoint, 0, len(tags))
+
+	for i := 0; i < len(tags); i += MaxMultiReadItems {
+		end := i + MaxMultiReadItems
+		if end > len(tags) {
+			end = len(tags)
+		}
+		batch := tags[i:end]
+
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+
+		batchResults, err := c.readTagBatch(ctx, batch)
+		if err != nil {
+			c.logger.Warn().Err(err).Int("batch_start", i).Msg("Batch read failed, falling back to individual reads")
+			for _, tag := range batch {
+				dp, readErr := c.ReadTag(ctx, tag)
+				if readErr != nil {
+					c.logger.Warn().Err(readErr).Str("tag", tag.ID).Msg("Failed to read tag")
+				}
+				results = append(results, dp)
+			}
+			continue
+		}
+		results = append(results, batchResults...)
+	}
+
+	return results, nil
+}
+
+// readTagBatch performs a multi-read operation for a batch of tags using AGReadMulti.
+// This is the performance-critical path that reduces N reads to 1.
+func (c *Client) readTagBatch(ctx context.Context, tags []*domain.Tag) ([]*domain.DataPoint, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+
+	// Prepare S7DataItems for each tag
+	dataItems := make([]gos7.S7DataItem, len(tags))
+	tagMeta := make([]struct {
+		tag       *domain.Tag
+		area      domain.S7Area
+		dbNumber  int
+		offset    int
+		bitOffset int
+	}, len(tags))
+
+	for i, tag := range tags {
+		area, dbNumber, offset, bitOffset, err := c.parseTagAddress(tag)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse address for tag %s: %w", tag.ID, err)
+		}
+
+		tagMeta[i].tag = tag
+		tagMeta[i].area = area
+		tagMeta[i].dbNumber = dbNumber
+		tagMeta[i].offset = offset
+		tagMeta[i].bitOffset = bitOffset
+
+		// Get area code
+		areaCode, ok := S7AreaCode[area]
+		if !ok {
+			return nil, fmt.Errorf("%w: %s for tag %s", domain.ErrS7InvalidArea, area, tag.ID)
+		}
+
+		// Calculate bytes to read and word length
+		byteCount := c.getByteCount(tag.DataType)
+		wordLen := c.getWordLength(tag.DataType)
+
+		// Allocate buffer for this item
+		dataItems[i] = gos7.S7DataItem{
+			Area:     areaCode,
+			WordLen:  wordLen,
+			DBNumber: dbNumber,
+			Start:    offset,
+			Bit:      bitOffset,
+			Amount:   byteCount,
+			Data:     make([]byte, byteCount),
+		}
+	}
+
+	// Serialize S7 operations
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		return nil, domain.ErrConnectionClosed
+	}
+
+	// Execute batch read
+	err := client.AGReadMulti(dataItems, len(dataItems))
+	if err != nil {
+		return nil, fmt.Errorf("%w: AGReadMulti failed: %v", domain.ErrS7ReadFailed, err)
+	}
+
+	// Convert results to DataPoints
+	results := make([]*domain.DataPoint, len(tags))
+	for i, item := range dataItems {
+		meta := tagMeta[i]
+		tag := meta.tag
+
+		// Check for per-item errors
+		if item.Error != "" {
+			c.stats.ErrorCount.Add(1)
+			c.recordTagError(tag.ID, fmt.Errorf(item.Error))
+			results[i] = c.createErrorDataPoint(tag, fmt.Errorf(item.Error))
+			continue
+		}
+
+		// Parse the raw bytes into a typed value
+		value, parseErr := c.parseValue(item.Data, tag, meta.bitOffset)
+		if parseErr != nil {
+			c.stats.ErrorCount.Add(1)
+			c.recordTagError(tag.ID, parseErr)
+			results[i] = c.createErrorDataPoint(tag, parseErr)
+			continue
+		}
+
+		// Apply scaling and offset
+		scaledValue := c.applyScaling(value, tag)
+
+		// Create data point
+		dp := domain.AcquireDataPoint(
+			c.deviceID,
+			tag.ID,
+			"", // Topic will be set by caller
+			scaledValue,
+			tag.Unit,
+			domain.QualityGood,
+		).WithRawValue(value)
+
+		results[i] = dp
+		c.stats.ReadCount.Add(1)
+		c.recordTagSuccess(tag.ID)
+	}
+
+	return results, nil
+}
+
+// getWordLength returns the S7 word length constant for a data type.
+func (c *Client) getWordLength(dataType domain.DataType) int {
+	switch dataType {
+	case domain.DataTypeBool:
+		return S7WLBit
+	case domain.DataTypeInt16, domain.DataTypeUInt16:
+		return S7WLWord
+	case domain.DataTypeInt32, domain.DataTypeUInt32:
+		return S7WLDWord
+	case domain.DataTypeFloat32:
+		return S7WLReal
+	case domain.DataTypeFloat64, domain.DataTypeInt64, domain.DataTypeUInt64:
+		return S7WLByte // Use byte mode for 8-byte types
+	default:
+		return S7WLByte
+	}
 }
 
 // WriteTag writes a value to a tag on the PLC.
@@ -310,18 +576,23 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 	c.mu.Unlock()
 
 	if !c.connected.Load() {
+		c.recordTagError(tag.ID, domain.ErrConnectionClosed)
 		return domain.ErrConnectionClosed
 	}
 
 	// Check if tag is writable
 	if !c.isTagWritable(tag) {
-		return fmt.Errorf("%w: tag %s", domain.ErrTagNotWritable, tag.ID)
+		err := fmt.Errorf("%w: tag %s", domain.ErrTagNotWritable, tag.ID)
+		c.recordTagError(tag.ID, err)
+		return err
 	}
 
 	// Parse tag address
 	area, dbNumber, offset, bitOffset, err := c.parseTagAddress(tag)
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.recordTagError(tag.ID, err)
+		c.consecutiveFailures.Add(1)
 		return err
 	}
 
@@ -337,6 +608,7 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 
 			select {
 			case <-ctx.Done():
+				c.recordTagError(tag.ID, ctx.Err())
 				return ctx.Err()
 			case <-time.After(delay):
 			}
@@ -350,6 +622,8 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 		// Check if error is retryable
 		if !c.isRetryableError(err) {
 			c.stats.ErrorCount.Add(1)
+			c.recordTagError(tag.ID, err)
+			c.consecutiveFailures.Add(1)
 			return err
 		}
 
@@ -362,9 +636,14 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 
 	if err != nil {
 		c.stats.ErrorCount.Add(1)
+		c.recordTagError(tag.ID, err)
+		c.consecutiveFailures.Add(1)
 		return err
 	}
 
+	// Success - reset consecutive failures and record success
+	c.consecutiveFailures.Store(0)
+	c.recordTagSuccess(tag.ID)
 	c.stats.WriteCount.Add(1)
 	c.logger.Debug().
 		Str("tag", tag.ID).
@@ -374,7 +653,190 @@ func (c *Client) WriteTag(ctx context.Context, tag *domain.Tag, value interface{
 	return nil
 }
 
+// WriteTags writes multiple tags using AGWriteMulti for batch writes.
+// Boolean writes are excluded from batching (they require read-modify-write)
+// and are handled individually after the batch.
+func (c *Client) WriteTags(ctx context.Context, writes []TagWrite) []error {
+	if len(writes) == 0 {
+		return nil
+	}
+
+	c.mu.Lock()
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+
+	if !c.connected.Load() {
+		errs := make([]error, len(writes))
+		for i := range errs {
+			errs[i] = domain.ErrConnectionClosed
+		}
+		return errs
+	}
+
+	errs := make([]error, len(writes))
+
+	// Separate boolean writes (need RMW) from non-boolean writes (can batch)
+	var batchable []indexedWrite
+	var boolWrites []indexedWrite
+
+	for i, w := range writes {
+		if !c.isTagWritable(w.Tag) {
+			errs[i] = fmt.Errorf("%w: tag %s", domain.ErrTagNotWritable, w.Tag.ID)
+			continue
+		}
+		if w.Tag.DataType == domain.DataTypeBool {
+			boolWrites = append(boolWrites, indexedWrite{origIndex: i, write: w})
+		} else {
+			batchable = append(batchable, indexedWrite{origIndex: i, write: w})
+		}
+	}
+
+	// Process batchable writes in chunks of MaxMultiWriteItems
+	for i := 0; i < len(batchable); i += MaxMultiWriteItems {
+		end := i + MaxMultiWriteItems
+		if end > len(batchable) {
+			end = len(batchable)
+		}
+		chunk := batchable[i:end]
+
+		select {
+		case <-ctx.Done():
+			for _, iw := range batchable[i:] {
+				errs[iw.origIndex] = ctx.Err()
+			}
+			for _, iw := range boolWrites {
+				if errs[iw.origIndex] == nil {
+					errs[iw.origIndex] = ctx.Err()
+				}
+			}
+			return errs
+		default:
+		}
+
+		batchErrs := c.writeTagBatch(ctx, chunk)
+		for j, bErr := range batchErrs {
+			errs[chunk[j].origIndex] = bErr
+		}
+	}
+
+	// Process boolean writes individually (read-modify-write)
+	for _, iw := range boolWrites {
+		select {
+		case <-ctx.Done():
+			errs[iw.origIndex] = ctx.Err()
+			continue
+		default:
+		}
+		errs[iw.origIndex] = c.WriteTag(ctx, iw.write.Tag, iw.write.Value)
+	}
+
+	return errs
+}
+
+// writeTagBatch performs a multi-write operation using AGWriteMulti.
+func (c *Client) writeTagBatch(ctx context.Context, writes []indexedWrite) []error {
+	errs := make([]error, len(writes))
+	if len(writes) == 0 {
+		return errs
+	}
+
+	// Prepare S7DataItems for each write
+	dataItems := make([]gos7.S7DataItem, 0, len(writes))
+	buffers := make([][]byte, 0, len(writes)) // track buffers to return to pool
+	validIndices := make([]int, 0, len(writes))
+
+	defer func() {
+		for _, buf := range buffers {
+			BufferPool.Put(buf)
+		}
+	}()
+
+	for i, iw := range writes {
+		area, dbNumber, offset, bitOffset, err := c.parseTagAddress(iw.write.Tag)
+		if err != nil {
+			errs[i] = fmt.Errorf("failed to parse address for tag %s: %w", iw.write.Tag.ID, err)
+			continue
+		}
+
+		areaCode, ok := S7AreaCode[area]
+		if !ok {
+			errs[i] = fmt.Errorf("%w: %s for tag %s", domain.ErrS7InvalidArea, area, iw.write.Tag.ID)
+			continue
+		}
+
+		buffer, err := c.valueToBytes(iw.write.Value, iw.write.Tag, bitOffset)
+		if err != nil {
+			errs[i] = fmt.Errorf("failed to convert value for tag %s: %w", iw.write.Tag.ID, err)
+			continue
+		}
+		buffers = append(buffers, buffer)
+
+		wordLen := c.getWordLength(iw.write.Tag.DataType)
+
+		dataItems = append(dataItems, gos7.S7DataItem{
+			Area:     areaCode,
+			WordLen:  wordLen,
+			DBNumber: dbNumber,
+			Start:    offset,
+			Bit:      bitOffset,
+			Amount:   len(buffer),
+			Data:     buffer,
+		})
+		validIndices = append(validIndices, i)
+	}
+
+	if len(dataItems) == 0 {
+		return errs
+	}
+
+	// Serialize S7 operations
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if client == nil {
+		for _, vi := range validIndices {
+			errs[vi] = domain.ErrConnectionClosed
+		}
+		return errs
+	}
+
+	startTime := time.Now()
+	err := client.AGWriteMulti(dataItems, len(dataItems))
+	elapsed := time.Since(startTime)
+	c.stats.TotalWriteTime.Add(elapsed.Nanoseconds())
+
+	if err != nil {
+		// Batch-level failure — attribute to all items
+		for _, vi := range validIndices {
+			errs[vi] = fmt.Errorf("%w: AGWriteMulti failed: %v", domain.ErrS7WriteFailed, err)
+			c.stats.ErrorCount.Add(1)
+		}
+		return errs
+	}
+
+	// Check per-item errors
+	for j, item := range dataItems {
+		vi := validIndices[j]
+		if item.Error != "" {
+			errs[vi] = fmt.Errorf("%w: %s", domain.ErrS7WriteFailed, item.Error)
+			c.stats.ErrorCount.Add(1)
+			c.recordTagError(writes[vi].write.Tag.ID, errs[vi])
+		} else {
+			c.stats.WriteCount.Add(1)
+			c.consecutiveFailures.Store(0)
+			c.recordTagSuccess(writes[vi].write.Tag.ID)
+		}
+	}
+
+	return errs
+}
+
 // readData performs the actual S7 read operation.
+// Uses opMu to serialize operations - gos7 client is NOT thread-safe.
 func (c *Client) readData(tag *domain.Tag, area domain.S7Area, dbNumber, offset, bitOffset int) (*domain.DataPoint, error) {
 	c.mu.RLock()
 	client := c.client
@@ -384,9 +846,14 @@ func (c *Client) readData(tag *domain.Tag, area domain.S7Area, dbNumber, offset,
 		return nil, domain.ErrConnectionClosed
 	}
 
+	// Serialize S7 operations to prevent protocol corruption
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	// Calculate bytes to read based on data type
 	byteCount := c.getByteCount(tag.DataType)
-	buffer := make([]byte, byteCount)
+	buffer := BufferPool.Get(byteCount)
+	defer BufferPool.Put(buffer)
 
 	// Get the S7 area code
 	areaCode, ok := S7AreaCode[area]
@@ -418,7 +885,7 @@ func (c *Client) readData(tag *domain.Tag, area domain.S7Area, dbNumber, offset,
 	scaledValue := c.applyScaling(value, tag)
 
 	// Create data point
-	dp := domain.NewDataPoint(
+	dp := domain.AcquireDataPoint(
 		c.deviceID,
 		tag.ID,
 		"", // Topic will be set by the caller
@@ -432,6 +899,7 @@ func (c *Client) readData(tag *domain.Tag, area domain.S7Area, dbNumber, offset,
 }
 
 // writeData performs the actual S7 write operation.
+// Uses opMu to serialize operations - gos7 client is NOT thread-safe.
 func (c *Client) writeData(tag *domain.Tag, area domain.S7Area, dbNumber, offset, bitOffset int, value interface{}) error {
 	c.mu.RLock()
 	client := c.client
@@ -441,11 +909,21 @@ func (c *Client) writeData(tag *domain.Tag, area domain.S7Area, dbNumber, offset
 		return domain.ErrConnectionClosed
 	}
 
+	// Serialize S7 operations to prevent protocol corruption
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	// For boolean writes, we need read-modify-write to preserve adjacent bits
+	if tag.DataType == domain.DataTypeBool {
+		return c.writeBoolWithRMW(client, tag, area, dbNumber, offset, bitOffset, value)
+	}
+
 	// Convert value to bytes
 	buffer, err := c.valueToBytes(value, tag, bitOffset)
 	if err != nil {
 		return err
 	}
+	defer BufferPool.Put(buffer) // Return buffer to pool after use
 
 	// Write to PLC
 	switch area {
@@ -458,6 +936,55 @@ func (c *Client) writeData(tag *domain.Tag, area domain.S7Area, dbNumber, offset
 	if err != nil {
 		return fmt.Errorf("%w: area=%s db=%d offset=%d: %v",
 			domain.ErrS7WriteFailed, area, dbNumber, offset, err)
+	}
+
+	return nil
+}
+
+// writeBoolWithRMW performs a read-modify-write for boolean values to preserve adjacent bits.
+// Must be called with opMu already held.
+func (c *Client) writeBoolWithRMW(client gos7.Client, tag *domain.Tag, area domain.S7Area, dbNumber, offset, bitOffset int, value interface{}) error {
+	// Convert value to bool
+	actualValue := c.reverseScaling(value, tag)
+	b, ok := toBool(actualValue)
+	if !ok {
+		return fmt.Errorf("%w: cannot convert %T to bool", domain.ErrInvalidWriteValue, value)
+	}
+
+	// Read current byte
+	currentByte := BufferPool.Get(1)
+	defer BufferPool.Put(currentByte)
+
+	var err error
+	switch area {
+	case domain.S7AreaDB:
+		err = client.AGReadDB(dbNumber, offset, 1, currentByte)
+	default:
+		err = client.AGReadEB(offset, 1, currentByte)
+	}
+
+	if err != nil {
+		return fmt.Errorf("%w: failed to read byte for RMW: %v", domain.ErrS7ReadFailed, err)
+	}
+
+	// Modify the specific bit
+	if b {
+		currentByte[0] |= (1 << bitOffset) // Set bit
+	} else {
+		currentByte[0] &^= (1 << bitOffset) // Clear bit
+	}
+
+	// Write back
+	switch area {
+	case domain.S7AreaDB:
+		err = client.AGWriteDB(dbNumber, offset, 1, currentByte)
+	default:
+		err = client.AGWriteEB(offset, 1, currentByte)
+	}
+
+	if err != nil {
+		return fmt.Errorf("%w: area=%s db=%d offset=%d bit=%d: %v",
+			domain.ErrS7WriteFailed, area, dbNumber, offset, bitOffset, err)
 	}
 
 	return nil
@@ -491,6 +1018,9 @@ func (c *Client) parseSymbolicAddress(address string) (domain.S7Area, int, int, 
 		bitOffset := 0
 		if matches[4] != "" {
 			bitOffset, _ = strconv.Atoi(matches[4])
+			if bitOffset > 7 {
+				return "", 0, 0, 0, fmt.Errorf("%w: bit offset %d out of range (0-7) in %s", domain.ErrS7InvalidAddress, bitOffset, address)
+			}
 		}
 		return domain.S7AreaDB, dbNum, offset, bitOffset, nil
 	}
@@ -503,6 +1033,9 @@ func (c *Client) parseSymbolicAddress(address string) (domain.S7Area, int, int, 
 		bitOffset := 0
 		if matches[3] != "" {
 			bitOffset, _ = strconv.Atoi(matches[3])
+			if bitOffset > 7 {
+				return "", 0, 0, 0, fmt.Errorf("%w: bit offset %d out of range (0-7) in %s", domain.ErrS7InvalidAddress, bitOffset, address)
+			}
 		}
 		return domain.S7AreaM, 0, offset, bitOffset, nil
 	}
@@ -515,6 +1048,9 @@ func (c *Client) parseSymbolicAddress(address string) (domain.S7Area, int, int, 
 		bitOffset := 0
 		if matches[3] != "" {
 			bitOffset, _ = strconv.Atoi(matches[3])
+			if bitOffset > 7 {
+				return "", 0, 0, 0, fmt.Errorf("%w: bit offset %d out of range (0-7) in %s", domain.ErrS7InvalidAddress, bitOffset, address)
+			}
 		}
 		return domain.S7AreaI, 0, offset, bitOffset, nil
 	}
@@ -527,6 +1063,9 @@ func (c *Client) parseSymbolicAddress(address string) (domain.S7Area, int, int, 
 		bitOffset := 0
 		if matches[3] != "" {
 			bitOffset, _ = strconv.Atoi(matches[3])
+			if bitOffset > 7 {
+				return "", 0, 0, 0, fmt.Errorf("%w: bit offset %d out of range (0-7) in %s", domain.ErrS7InvalidAddress, bitOffset, address)
+			}
 		}
 		return domain.S7AreaQ, 0, offset, bitOffset, nil
 	}
@@ -546,212 +1085,6 @@ func (c *Client) parseSymbolicAddress(address string) (domain.S7Area, int, int, 
 	}
 
 	return "", 0, 0, 0, fmt.Errorf("%w: %s", domain.ErrS7InvalidAddress, address)
-}
-
-// parseValue converts raw bytes to a typed value based on the tag's data type.
-func (c *Client) parseValue(data []byte, tag *domain.Tag, bitOffset int) (interface{}, error) {
-	if len(data) == 0 {
-		return nil, domain.ErrInvalidDataLength
-	}
-
-	switch tag.DataType {
-	case domain.DataTypeBool:
-		if len(data) < 1 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return (data[0] & (1 << bitOffset)) != 0, nil
-
-	case domain.DataTypeInt16:
-		if len(data) < 2 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return int16(binary.BigEndian.Uint16(data)), nil
-
-	case domain.DataTypeUInt16:
-		if len(data) < 2 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return binary.BigEndian.Uint16(data), nil
-
-	case domain.DataTypeInt32:
-		if len(data) < 4 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return int32(binary.BigEndian.Uint32(data)), nil
-
-	case domain.DataTypeUInt32:
-		if len(data) < 4 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return binary.BigEndian.Uint32(data), nil
-
-	case domain.DataTypeInt64:
-		if len(data) < 8 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return int64(binary.BigEndian.Uint64(data)), nil
-
-	case domain.DataTypeUInt64:
-		if len(data) < 8 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		return binary.BigEndian.Uint64(data), nil
-
-	case domain.DataTypeFloat32:
-		if len(data) < 4 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		bits := binary.BigEndian.Uint32(data)
-		return math.Float32frombits(bits), nil
-
-	case domain.DataTypeFloat64:
-		if len(data) < 8 {
-			return nil, domain.ErrInvalidDataLength
-		}
-		bits := binary.BigEndian.Uint64(data)
-		return math.Float64frombits(bits), nil
-
-	default:
-		return nil, domain.ErrInvalidDataType
-	}
-}
-
-// valueToBytes converts a value to bytes for writing.
-func (c *Client) valueToBytes(value interface{}, tag *domain.Tag, bitOffset int) ([]byte, error) {
-	// Reverse scaling if applied
-	actualValue := c.reverseScaling(value, tag)
-
-	switch tag.DataType {
-	case domain.DataTypeBool:
-		b, ok := toBool(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to bool", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 1)
-		if b {
-			data[0] = 1 << bitOffset
-		}
-		return data, nil
-
-	case domain.DataTypeInt16:
-		i, ok := toInt64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to int16", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 2)
-		binary.BigEndian.PutUint16(data, uint16(int16(i)))
-		return data, nil
-
-	case domain.DataTypeUInt16:
-		i, ok := toInt64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint16", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 2)
-		binary.BigEndian.PutUint16(data, uint16(i))
-		return data, nil
-
-	case domain.DataTypeInt32:
-		i, ok := toInt64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to int32", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 4)
-		binary.BigEndian.PutUint32(data, uint32(int32(i)))
-		return data, nil
-
-	case domain.DataTypeUInt32:
-		i, ok := toInt64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint32", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 4)
-		binary.BigEndian.PutUint32(data, uint32(i))
-		return data, nil
-
-	case domain.DataTypeInt64:
-		i, ok := toInt64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to int64", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 8)
-		binary.BigEndian.PutUint64(data, uint64(i))
-		return data, nil
-
-	case domain.DataTypeUInt64:
-		i, ok := toUint64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to uint64", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 8)
-		binary.BigEndian.PutUint64(data, i)
-		return data, nil
-
-	case domain.DataTypeFloat32:
-		f, ok := toFloat64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to float32", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 4)
-		binary.BigEndian.PutUint32(data, math.Float32bits(float32(f)))
-		return data, nil
-
-	case domain.DataTypeFloat64:
-		f, ok := toFloat64(actualValue)
-		if !ok {
-			return nil, fmt.Errorf("%w: cannot convert %T to float64", domain.ErrInvalidWriteValue, value)
-		}
-		data := make([]byte, 8)
-		binary.BigEndian.PutUint64(data, math.Float64bits(f))
-		return data, nil
-
-	default:
-		return nil, fmt.Errorf("%w: unsupported data type %s", domain.ErrInvalidDataType, tag.DataType)
-	}
-}
-
-// getByteCount returns the number of bytes needed for a data type.
-func (c *Client) getByteCount(dataType domain.DataType) int {
-	switch dataType {
-	case domain.DataTypeBool:
-		return 1
-	case domain.DataTypeInt16, domain.DataTypeUInt16:
-		return 2
-	case domain.DataTypeInt32, domain.DataTypeUInt32, domain.DataTypeFloat32:
-		return 4
-	case domain.DataTypeInt64, domain.DataTypeUInt64, domain.DataTypeFloat64:
-		return 8
-	default:
-		return 1
-	}
-}
-
-// applyScaling applies scale factor and offset to the value.
-func (c *Client) applyScaling(value interface{}, tag *domain.Tag) interface{} {
-	if tag.ScaleFactor == 1.0 && tag.Offset == 0 {
-		return value
-	}
-
-	floatVal, ok := toFloat64(value)
-	if !ok {
-		return value
-	}
-
-	return floatVal*tag.ScaleFactor + tag.Offset
-}
-
-// reverseScaling reverses the scaling for write operations.
-func (c *Client) reverseScaling(value interface{}, tag *domain.Tag) interface{} {
-	if tag.ScaleFactor == 1.0 && tag.Offset == 0 {
-		return value
-	}
-
-	floatVal, ok := toFloat64(value)
-	if !ok {
-		return value
-	}
-
-	return (floatVal - tag.Offset) / tag.ScaleFactor
 }
 
 // groupTagsByArea groups tags by S7 memory area for efficient batch reads.
@@ -805,7 +1138,7 @@ func (c *Client) createErrorDataPoint(tag *domain.Tag, err error) *domain.DataPo
 		quality = domain.QualityNotConnected
 	}
 
-	return domain.NewDataPoint(
+	return domain.AcquireDataPoint(
 		c.deviceID,
 		tag.ID,
 		"",
@@ -848,149 +1181,17 @@ func (c *Client) isConnectionError(err error) bool {
 
 // reconnect attempts to re-establish the connection.
 func (c *Client) reconnect(ctx context.Context) {
+	c.stats.ReconnectCount.Add(1)
 	c.Disconnect()
 	if err := c.Connect(ctx); err != nil {
+		c.mu.Lock()
+		c.lastError = err
+		c.mu.Unlock()
 		c.logger.Error().Err(err).Msg("Failed to reconnect to S7 PLC")
+	} else {
+		c.mu.Lock()
+		c.lastError = nil
+		c.mu.Unlock()
+		c.logger.Info().Msg("Reconnected to S7 PLC")
 	}
 }
-
-// GetStats returns the client statistics.
-func (c *Client) GetStats() map[string]uint64 {
-	return map[string]uint64{
-		"read_count":       c.stats.ReadCount.Load(),
-		"write_count":      c.stats.WriteCount.Load(),
-		"error_count":      c.stats.ErrorCount.Load(),
-		"retry_count":      c.stats.RetryCount.Load(),
-		"total_read_ns":    uint64(c.stats.TotalReadTime.Load()),
-		"total_write_ns":   uint64(c.stats.TotalWriteTime.Load()),
-	}
-}
-
-// GetStatsStruct returns the raw stats struct for direct access.
-func (c *Client) GetStatsStruct() *ClientStats {
-	return c.stats
-}
-
-// LastUsed returns when the client was last used.
-func (c *Client) LastUsed() time.Time {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastUsed
-}
-
-// DeviceID returns the device ID this client is connected to.
-func (c *Client) DeviceID() string {
-	return c.deviceID
-}
-
-// Helper functions for type conversion
-func toBool(v interface{}) (bool, bool) {
-	switch val := v.(type) {
-	case bool:
-		return val, true
-	case int, int8, int16, int32, int64:
-		return val != 0, true
-	case uint, uint8, uint16, uint32, uint64:
-		return val != 0, true
-	case float32:
-		return val != 0, true
-	case float64:
-		return val != 0, true
-	default:
-		return false, false
-	}
-}
-
-func toInt64(v interface{}) (int64, bool) {
-	switch val := v.(type) {
-	case int:
-		return int64(val), true
-	case int8:
-		return int64(val), true
-	case int16:
-		return int64(val), true
-	case int32:
-		return int64(val), true
-	case int64:
-		return val, true
-	case uint:
-		return int64(val), true
-	case uint8:
-		return int64(val), true
-	case uint16:
-		return int64(val), true
-	case uint32:
-		return int64(val), true
-	case uint64:
-		return int64(val), true
-	case float32:
-		return int64(val), true
-	case float64:
-		return int64(val), true
-	default:
-		return 0, false
-	}
-}
-
-func toUint64(v interface{}) (uint64, bool) {
-	switch val := v.(type) {
-	case int:
-		return uint64(val), true
-	case int8:
-		return uint64(val), true
-	case int16:
-		return uint64(val), true
-	case int32:
-		return uint64(val), true
-	case int64:
-		return uint64(val), true
-	case uint:
-		return uint64(val), true
-	case uint8:
-		return uint64(val), true
-	case uint16:
-		return uint64(val), true
-	case uint32:
-		return uint64(val), true
-	case uint64:
-		return val, true
-	case float32:
-		return uint64(val), true
-	case float64:
-		return uint64(val), true
-	default:
-		return 0, false
-	}
-}
-
-func toFloat64(v interface{}) (float64, bool) {
-	switch val := v.(type) {
-	case int:
-		return float64(val), true
-	case int8:
-		return float64(val), true
-	case int16:
-		return float64(val), true
-	case int32:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case uint:
-		return float64(val), true
-	case uint8:
-		return float64(val), true
-	case uint16:
-		return float64(val), true
-	case uint32:
-		return float64(val), true
-	case uint64:
-		return float64(val), true
-	case float32:
-		return float64(val), true
-	case float64:
-		return val, true
-	default:
-		return 0, false
-	}
-}
-

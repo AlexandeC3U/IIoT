@@ -1,7 +1,8 @@
-# Protocol Gateway - Kubernetes Deployment
-# Handles industrial protocol conversion (Modbus, OPC UA, S7 -> MQTT)
+# Protocol Gateway - Kubernetes StatefulSet
+# Single-replica stateful deployment for industrial protocol gateway
+# Handles OPC UA, Modbus, S7 → MQTT conversion
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: protocol-gateway
   namespace: nexus
@@ -10,15 +11,15 @@ metadata:
     app.kubernetes.io/component: gateway
     app.kubernetes.io/part-of: nexus-edge
 spec:
-  replicas: 2
+  replicas: 1  # Single instance - protocol gateways don't horizontally scale
+  serviceName: protocol-gateway
   selector:
     matchLabels:
       app.kubernetes.io/name: protocol-gateway
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
-      maxSurge: 1
+  
+  # Ordered pod management for clean shutdown
+  podManagementPolicy: OrderedReady
+  
   template:
     metadata:
       labels:
@@ -27,7 +28,7 @@ spec:
         app.kubernetes.io/part-of: nexus-edge
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8081"
+        prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: protocol-gateway
@@ -35,6 +36,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      
+      # Graceful shutdown - must be > 30s (gateway's internal shutdown timeout)
+      terminationGracePeriodSeconds: 35
       
       containers:
         - name: protocol-gateway
@@ -45,47 +49,62 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
-            - name: health
-              containerPort: 8081
-              protocol: TCP
           
           env:
-            # From ConfigMap
-            - name: NEXUS_MQTT_BROKER
+            # MQTT Configuration
+            - name: MQTT_BROKER_URL
               valueFrom:
                 configMapKeyRef:
                   name: nexus-config
                   key: MQTT_BROKER
-            - name: NEXUS_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: nexus-config
-                  key: LOG_LEVEL
-            # From Secrets
-            - name: NEXUS_MQTT_USERNAME
+            - name: MQTT_USERNAME
               valueFrom:
                 secretKeyRef:
                   name: nexus-secrets
                   key: MQTT_USERNAME
-            - name: NEXUS_MQTT_PASSWORD
+            - name: MQTT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: nexus-secrets
                   key: MQTT_PASSWORD
-            # Instance identifier for load balancing
+            
+            # Logging
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: nexus-config
+                  key: LOG_LEVEL
+            
+            # Device config path
+            - name: DEVICES_CONFIG_PATH
+              value: "/app/config/devices.yaml"
+            
+            # Environment
+            - name: ENVIRONMENT
+              value: "production"
+            
+            # Pod identity
             - name: POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
           
-          # Mount config file
           volumeMounts:
+            # Application config
             - name: config
-              mountPath: /app/config
+              mountPath: /app/config/config.yaml
+              subPath: config.yaml
               readOnly: true
+            
+            # Device definitions
             - name: devices
-              mountPath: /app/config/devices
+              mountPath: /app/config/devices.yaml
+              subPath: devices.yaml
               readOnly: true
+            
+            # OPC UA PKI trust store (persistent)
+            - name: pki-store
+              mountPath: /app/certs/pki
           
           resources:
             requests:
@@ -95,38 +114,38 @@ spec:
               cpu: "1000m"
               memory: "1Gi"
           
-          # Startup probe - gives time for initial connections
+          # Startup probe - allows time for initial device connections
           startupProbe:
             httpGet:
-              path: /health
-              port: health
+              path: /health/ready
+              port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
-            failureThreshold: 30
+            failureThreshold: 30  # 150 seconds max startup
           
-          # Liveness probe - restart if unhealthy
+          # Liveness probe - restart if process is hung
           livenessProbe:
             httpGet:
-              path: /health
-              port: health
+              path: /health/live
+              port: 8080
             initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 3
           
           # Readiness probe - remove from service if not ready
           readinessProbe:
             httpGet:
-              path: /health
-              port: health
+              path: /health/ready
+              port: 8080
             initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            readOnlyRootFilesystem: false  # PKI store needs writes
             capabilities:
               drop:
                 - ALL
@@ -138,18 +157,15 @@ spec:
         - name: devices
           configMap:
             name: protocol-gateway-devices
-      
-      # Spread pods across nodes for HA
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: protocol-gateway
-                topologyKey: kubernetes.io/hostname
-      
-      # Graceful shutdown
-      terminationGracePeriodSeconds: 30
-
+  
+  # Persistent volume for PKI trust store
+  volumeClaimTemplates:
+    - metadata:
+        name: pki-store
+        labels:
+          app.kubernetes.io/name: protocol-gateway
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Mi

@@ -3,6 +3,7 @@
 package domain
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -51,9 +52,6 @@ type Device struct {
 	// PollInterval is the default polling interval for all tags (can be overridden per tag)
 	PollInterval time.Duration `json:"poll_interval" yaml:"poll_interval"`
 
-	// RateLimiting contains per-device rate limiting settings
-	RateLimiting RateLimitConfig `json:"rate_limiting,omitempty" yaml:"rate_limiting,omitempty"`
-
 	// Enabled indicates whether this device should be actively polled
 	Enabled bool `json:"enabled" yaml:"enabled"`
 
@@ -69,31 +67,18 @@ type Device struct {
 
 	// UpdatedAt is when this device configuration was last modified
 	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
-}
 
-// RateLimitConfig holds per-device rate limiting settings.
-// Rate limiting protects devices from being overwhelmed by requests.
-type RateLimitConfig struct {
-	// Enabled enables rate limiting for this device
-	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// ConfigVersion tracks configuration revisions for fleet management.
+	// Incremented on each configuration update.
+	ConfigVersion uint32 `json:"config_version,omitempty" yaml:"config_version,omitempty"`
 
-	// MinInterval is the minimum time between consecutive operations to this device.
-	// If a poll is attempted before MinInterval has passed since the last operation,
-	// it will be delayed or skipped based on the SkipOnLimit setting.
-	MinInterval time.Duration `json:"min_interval,omitempty" yaml:"min_interval,omitempty"`
+	// ActiveConfigVersion is the currently running configuration version.
+	// May differ from ConfigVersion during rolling updates.
+	ActiveConfigVersion uint32 `json:"active_config_version,omitempty" yaml:"active_config_version,omitempty"`
 
-	// MaxRequestsPerSecond limits the number of requests per second to this device.
-	// 0 means unlimited. This is an alternative to MinInterval.
-	MaxRequestsPerSecond float64 `json:"max_requests_per_second,omitempty" yaml:"max_requests_per_second,omitempty"`
-
-	// BurstSize is the maximum number of requests that can be made in a burst.
-	// Defaults to 1 if not specified.
-	BurstSize int `json:"burst_size,omitempty" yaml:"burst_size,omitempty"`
-
-	// SkipOnLimit determines behavior when rate limit is hit:
-	// true = skip the operation and log (recommended for polling)
-	// false = wait/delay until rate limit allows (blocks the worker)
-	SkipOnLimit bool `json:"skip_on_limit,omitempty" yaml:"skip_on_limit,omitempty"`
+	// LastKnownGoodVersion is the last configuration that worked successfully.
+	// Used for automatic rollback on failures.
+	LastKnownGoodVersion uint32 `json:"last_known_good_version,omitempty" yaml:"last_known_good_version,omitempty"`
 }
 
 // ConnectionConfig holds protocol-specific connection parameters.
@@ -162,6 +147,24 @@ type ConnectionConfig struct {
 	// OPCKeyFile path for private key (certificate authentication)
 	OPCKeyFile string `json:"opc_key_file,omitempty" yaml:"opc_key_file,omitempty"`
 
+	// OPCServerCertFile path for trusted server certificate (optional)
+	// If not provided, server certificate is not verified (insecure)
+	OPCServerCertFile string `json:"opc_server_cert_file,omitempty" yaml:"opc_server_cert_file,omitempty"`
+
+	// OPCInsecureSkipVerify disables server certificate verification
+	// WARNING: Only use for testing with self-signed certificates
+	OPCInsecureSkipVerify bool `json:"opc_insecure_skip_verify,omitempty" yaml:"opc_insecure_skip_verify,omitempty"`
+
+	// OPCAutoSelectEndpoint enables automatic endpoint discovery
+	// When true, queries available endpoints and selects best security match
+	OPCAutoSelectEndpoint bool `json:"opc_auto_select_endpoint,omitempty" yaml:"opc_auto_select_endpoint,omitempty"`
+
+	// OPCApplicationName is the client application name for OPC UA
+	OPCApplicationName string `json:"opc_application_name,omitempty" yaml:"opc_application_name,omitempty"`
+
+	// OPCApplicationURI is the client application URI for OPC UA
+	OPCApplicationURI string `json:"opc_application_uri,omitempty" yaml:"opc_application_uri,omitempty"`
+
 	// OPCPublishInterval is the subscription publish interval for OPC UA
 	OPCPublishInterval time.Duration `json:"opc_publish_interval,omitempty" yaml:"opc_publish_interval,omitempty"`
 
@@ -171,9 +174,8 @@ type ConnectionConfig struct {
 	// OPCUseSubscriptions enables OPC UA subscriptions (Report-by-Exception) instead of polling.
 	// When true, the server pushes data changes to the client, which is more efficient
 	// for slow-changing values. Requires OPCPublishInterval and OPCSamplingInterval.
-	// NOTE: Not yet implemented - planned for Phase 3 (Gateway Core).
-	// Currently all OPC UA devices use polling.
-	OPCUseSubscriptions bool `json:"opc_use_subscriptions,omitempty" yaml:"opc_use_subscriptions,omitempty"`
+	// Falls back to polling if subscription setup fails.
+	OPCUseSubscriptions bool `json:"opc_use_subscriptions" yaml:"opc_use_subscriptions"`
 
 	// === S7 (Siemens) Settings ===
 
@@ -188,6 +190,36 @@ type ConnectionConfig struct {
 
 	// S7Timeout is the connection timeout for S7 (default: 10s)
 	S7Timeout time.Duration `json:"s7_timeout,omitempty" yaml:"s7_timeout,omitempty"`
+
+	// === Circuit Breaker Override ===
+
+	// CircuitBreaker provides per-device circuit breaker overrides.
+	// When set, these values override the pool-level defaults.
+	// Useful for fast-fail on critical devices or lenient thresholds on flaky legacy PLCs.
+	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty" yaml:"circuit_breaker,omitempty"`
+}
+
+// CircuitBreakerConfig holds per-device circuit breaker settings.
+// All fields are optional — zero values mean "use pool default".
+type CircuitBreakerConfig struct {
+	// MaxRequests is the number of requests allowed in the half-open state.
+	MaxRequests uint32 `json:"max_requests,omitempty" yaml:"max_requests,omitempty"`
+
+	// Interval is the cyclic period of the closed state for clearing internal counts.
+	// If 0, internal counts are never cleared in the closed state.
+	Interval time.Duration `json:"interval,omitempty" yaml:"interval,omitempty"`
+
+	// Timeout is the period of the open state, after which the circuit breaker
+	// transitions to half-open.
+	Timeout time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
+	// FailureThreshold is the minimum number of requests before the failure ratio
+	// is evaluated (for ratio-based tripping).
+	FailureThreshold uint32 `json:"failure_threshold,omitempty" yaml:"failure_threshold,omitempty"`
+
+	// FailureRatio is the failure ratio (0.0-1.0) that triggers the circuit breaker.
+	// For example, 0.6 means trip when 60% of requests fail.
+	FailureRatio float64 `json:"failure_ratio,omitempty" yaml:"failure_ratio,omitempty"`
 }
 
 // Validate performs validation on the device configuration.
@@ -209,6 +241,12 @@ func (d *Device) Validate() error {
 	}
 	if d.UNSPrefix == "" {
 		return ErrUNSPrefixRequired
+	}
+
+	for i := range d.Tags {
+		if err := d.Tags[i].ValidateForProtocol(d.Protocol); err != nil {
+			return fmt.Errorf("invalid tag %q for device %q: %w", d.Tags[i].ID, d.ID, err)
+		}
 	}
 	return nil
 }

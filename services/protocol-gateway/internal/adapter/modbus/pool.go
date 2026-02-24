@@ -30,47 +30,10 @@ type pooledClient struct {
 	client    *Client
 	device    *domain.Device
 	breaker   *gobreaker.CircuitBreaker // Per-device circuit breaker for isolation
+	createdAt time.Time                 // Connection creation time for MaxTTL enforcement
 	inUse     bool
 	lastError error
 	mu        sync.Mutex
-}
-
-// PoolConfig holds configuration for the connection pool.
-type PoolConfig struct {
-	// MaxConnections is the maximum number of concurrent connections
-	MaxConnections int
-
-	// IdleTimeout is how long to keep idle connections open
-	IdleTimeout time.Duration
-
-	// HealthCheckPeriod is how often to check connection health
-	HealthCheckPeriod time.Duration
-
-	// ConnectionTimeout is the timeout for establishing new connections
-	ConnectionTimeout time.Duration
-
-	// RetryAttempts is the number of retry attempts for failed operations
-	RetryAttempts int
-
-	// RetryDelay is the base delay between retries
-	RetryDelay time.Duration
-
-	// CircuitBreakerName is the name for the circuit breaker
-	CircuitBreakerName string
-}
-
-// DefaultPoolConfig returns a PoolConfig with sensible defaults.
-// MaxConnections defaults to 500 to support industrial-scale deployments (100-1000 devices).
-func DefaultPoolConfig() PoolConfig {
-	return PoolConfig{
-		MaxConnections:     500,
-		IdleTimeout:        5 * time.Minute,
-		HealthCheckPeriod:  30 * time.Second,
-		ConnectionTimeout:  10 * time.Second,
-		RetryAttempts:      3,
-		RetryDelay:         100 * time.Millisecond,
-		CircuitBreakerName: "modbus-pool",
-	}
 }
 
 // NewConnectionPool creates a new connection pool.
@@ -109,15 +72,42 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 
 // createCircuitBreaker creates a per-device circuit breaker.
 // Per-device breakers ensure one failing device doesn't affect others.
-func (p *ConnectionPool) createCircuitBreaker(deviceID string) *gobreaker.CircuitBreaker {
+// If the device has a CircuitBreakerConfig override, those values take precedence.
+func (p *ConnectionPool) createCircuitBreaker(device *domain.Device) *gobreaker.CircuitBreaker {
+	// Pool defaults
+	maxRequests := uint32(3)
+	interval := 10 * time.Second
+	timeout := 30 * time.Second
+	failureThreshold := uint32(10)
+	failureRatio := 0.6
+
+	// Apply per-device overrides
+	if cb := device.Connection.CircuitBreaker; cb != nil {
+		if cb.MaxRequests > 0 {
+			maxRequests = cb.MaxRequests
+		}
+		if cb.Interval > 0 {
+			interval = cb.Interval
+		}
+		if cb.Timeout > 0 {
+			timeout = cb.Timeout
+		}
+		if cb.FailureThreshold > 0 {
+			failureThreshold = cb.FailureThreshold
+		}
+		if cb.FailureRatio > 0 {
+			failureRatio = cb.FailureRatio
+		}
+	}
+
 	return gobreaker.NewCircuitBreaker(gobreaker.Settings{
-		Name:        fmt.Sprintf("modbus-%s", deviceID),
-		MaxRequests: 3,
-		Interval:    10 * time.Second,
-		Timeout:     30 * time.Second,
+		Name:        fmt.Sprintf("modbus-%s", device.ID),
+		MaxRequests: maxRequests,
+		Interval:    interval,
+		Timeout:     timeout,
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
-			return counts.Requests >= 10 && failureRatio >= 0.6
+			ratio := float64(counts.TotalFailures) / float64(counts.Requests)
+			return counts.Requests >= failureThreshold && ratio >= failureRatio
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
 			p.logger.Info().
@@ -129,8 +119,8 @@ func (p *ConnectionPool) createCircuitBreaker(deviceID string) *gobreaker.Circui
 	})
 }
 
-// getOrCreatePooledClient gets or creates a pooledClient with its per-device circuit breaker.
-func (p *ConnectionPool) getOrCreatePooledClient(ctx context.Context, device *domain.Device) (*pooledClient, error) {
+// GetClient retrieves or creates a client for the given device.
+func (p *ConnectionPool) GetClient(ctx context.Context, device *domain.Device) (*Client, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -138,9 +128,26 @@ func (p *ConnectionPool) getOrCreatePooledClient(ctx context.Context, device *do
 		return nil, domain.ErrServiceStopped
 	}
 
-	// Check if we already have a pooledClient for this device
+	// Check if we already have a client for this device
 	if pc, exists := p.clients[device.ID]; exists {
-		return pc, nil
+		pc.mu.Lock()
+		defer pc.mu.Unlock()
+
+		if pc.client.IsConnected() {
+			return pc.client, nil
+		}
+
+		// Try to reconnect
+		start := time.Now()
+		err := pc.client.Connect(ctx)
+		if p.metrics != nil {
+			p.metrics.RecordConnectionForProtocol(string(device.Protocol), err == nil, time.Since(start).Seconds())
+		}
+		if err != nil {
+			pc.lastError = err
+			return nil, err
+		}
+		return pc.client, nil
 	}
 
 	// Check pool capacity
@@ -154,41 +161,19 @@ func (p *ConnectionPool) getOrCreatePooledClient(ctx context.Context, device *do
 		return nil, err
 	}
 
-	pc := &pooledClient{
-		client:  client,
-		device:  device,
-		breaker: p.createCircuitBreaker(device.ID),
+	p.clients[device.ID] = &pooledClient{
+		client:    client,
+		device:    device,
+		breaker:   p.createCircuitBreaker(device),
+		createdAt: time.Now(),
 	}
-	p.clients[device.ID] = pc
 
 	p.logger.Info().
 		Str("device_id", device.ID).
 		Int("pool_size", len(p.clients)).
 		Msg("Created new Modbus client with per-device circuit breaker")
 
-	return pc, nil
-}
-
-// GetClient retrieves or creates a client for the given device.
-// Uses getOrCreatePooledClient internally to ensure consistent circuit breaker setup.
-func (p *ConnectionPool) GetClient(ctx context.Context, device *domain.Device) (*Client, error) {
-	pc, err := p.getOrCreatePooledClient(ctx, device)
-	if err != nil {
-		return nil, err
-	}
-
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
-
-	// Ensure client is connected
-	if !pc.client.IsConnected() {
-		if err := pc.client.Connect(ctx); err != nil {
-			pc.lastError = err
-			return nil, err
-		}
-	}
-
-	return pc.client, nil
+	return client, nil
 }
 
 // createClient creates a new Modbus client for the device.
@@ -225,7 +210,12 @@ func (p *ConnectionPool) createClient(ctx context.Context, device *domain.Device
 	connectCtx, cancel := context.WithTimeout(ctx, p.config.ConnectionTimeout)
 	defer cancel()
 
-	if err := client.Connect(connectCtx); err != nil {
+	start := time.Now()
+	err = client.Connect(connectCtx)
+	if p.metrics != nil {
+		p.metrics.RecordConnectionForProtocol(string(device.Protocol), err == nil, time.Since(start).Seconds())
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -235,26 +225,26 @@ func (p *ConnectionPool) createClient(ctx context.Context, device *domain.Device
 // ReadTags reads multiple tags from a device using the pooled connection.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) ReadTags(ctx context.Context, device *domain.Device, tags []*domain.Tag) ([]*domain.DataPoint, error) {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return nil, err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return nil, domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	result, err := pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return pc.client.ReadTags(ctx, tags)
+		return client.ReadTags(ctx, tags)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -268,26 +258,26 @@ func (p *ConnectionPool) ReadTags(ctx context.Context, device *domain.Device, ta
 // ReadTag reads a single tag from a device.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) ReadTag(ctx context.Context, device *domain.Device, tag *domain.Tag) (*domain.DataPoint, error) {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return nil, err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return nil, domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	result, err := pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return pc.client.ReadTag(ctx, tag)
+		return client.ReadTag(ctx, tag)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -301,26 +291,26 @@ func (p *ConnectionPool) ReadTag(ctx context.Context, device *domain.Device, tag
 // WriteTag writes a value to a tag on the device.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) WriteTag(ctx context.Context, device *domain.Device, tag *domain.Tag, value interface{}) error {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return nil, pc.client.WriteTag(ctx, tag, value)
+		return nil, client.WriteTag(ctx, tag, value)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -334,26 +324,26 @@ func (p *ConnectionPool) WriteTag(ctx context.Context, device *domain.Device, ta
 // WriteSingleCoil writes a boolean value to a coil at the specified address.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) WriteSingleCoil(ctx context.Context, device *domain.Device, address uint16, value bool) error {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return nil, pc.client.WriteSingleCoil(ctx, address, value)
+		return nil, client.WriteSingleCoil(ctx, address, value)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -367,26 +357,26 @@ func (p *ConnectionPool) WriteSingleCoil(ctx context.Context, device *domain.Dev
 // WriteSingleRegister writes a 16-bit value to a holding register.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) WriteSingleRegister(ctx context.Context, device *domain.Device, address uint16, value uint16) error {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return nil, pc.client.WriteSingleRegister(ctx, address, value)
+		return nil, client.WriteSingleRegister(ctx, address, value)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -400,26 +390,26 @@ func (p *ConnectionPool) WriteSingleRegister(ctx context.Context, device *domain
 // WriteMultipleRegisters writes multiple 16-bit values to consecutive holding registers.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) WriteMultipleRegisters(ctx context.Context, device *domain.Device, address uint16, values []uint16) error {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return nil, pc.client.WriteMultipleRegisters(ctx, address, values)
+		return nil, client.WriteMultipleRegisters(ctx, address, values)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -433,26 +423,26 @@ func (p *ConnectionPool) WriteMultipleRegisters(ctx context.Context, device *dom
 // WriteMultipleCoils writes multiple boolean values to consecutive coils.
 // Uses per-device circuit breaker for fault isolation.
 func (p *ConnectionPool) WriteMultipleCoils(ctx context.Context, device *domain.Device, address uint16, values []bool) error {
-	// Get or create pooled client with per-device circuit breaker
-	pc, err := p.getOrCreatePooledClient(ctx, device)
+	// Get client (this also gets/creates the per-device circuit breaker)
+	client, err := p.GetClient(ctx, device)
 	if err != nil {
 		return err
 	}
 
+	// Get the pooled client for its circuit breaker
+	p.mu.RLock()
+	pc := p.clients[device.ID]
+	p.mu.RUnlock()
+
+	if pc == nil {
+		return domain.ErrDeviceNotFound
+	}
+
 	// Use per-device circuit breaker
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
-		pc.mu.Lock()
-		defer pc.mu.Unlock()
-
-		// Ensure client is connected
-		if !pc.client.IsConnected() {
-			if err := pc.client.Connect(ctx); err != nil {
-				pc.lastError = err
-				return nil, err
-			}
-		}
-		return nil, pc.client.WriteMultipleCoils(ctx, address, values)
+		return nil, client.WriteMultipleCoils(ctx, address, values)
 	})
+
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -540,7 +530,42 @@ func (p *ConnectionPool) healthCheckLoop() {
 			for _, deviceID := range deviceIDs {
 				p.checkClientHealth(deviceID)
 			}
+
+			p.publishActiveConnectionMetrics()
 		}
+	}
+}
+
+func (p *ConnectionPool) publishActiveConnectionMetrics() {
+	if p.metrics == nil {
+		return
+	}
+
+	counts := make(map[domain.Protocol]int)
+
+	p.mu.RLock()
+	for _, pc := range p.clients {
+		pc.mu.Lock()
+		connected := pc.client.IsConnected()
+		protocol := pc.device.Protocol
+		pc.mu.Unlock()
+
+		if !connected {
+			continue
+		}
+		counts[protocol]++
+	}
+	p.mu.RUnlock()
+
+	for protocol, count := range counts {
+		p.metrics.UpdateActiveConnectionsForProtocol(string(protocol), count)
+	}
+	// Ensure the known Modbus protocol labels are always updated (avoid stale values).
+	if _, ok := counts[domain.ProtocolModbusTCP]; !ok {
+		p.metrics.UpdateActiveConnectionsForProtocol(string(domain.ProtocolModbusTCP), 0)
+	}
+	if _, ok := counts[domain.ProtocolModbusRTU]; !ok {
+		p.metrics.UpdateActiveConnectionsForProtocol(string(domain.ProtocolModbusRTU), 0)
 	}
 }
 
@@ -563,7 +588,12 @@ func (p *ConnectionPool) checkClientHealth(deviceID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), p.config.ConnectionTimeout)
 		defer cancel()
 
-		if err := pc.client.Connect(ctx); err != nil {
+		start := time.Now()
+		err := pc.client.Connect(ctx)
+		if p.metrics != nil {
+			p.metrics.RecordConnectionForProtocol(string(pc.device.Protocol), err == nil, time.Since(start).Seconds())
+		}
+		if err != nil {
 			pc.lastError = err
 			p.logger.Warn().Err(err).Str("device_id", deviceID).Msg("Failed to reconnect client")
 		} else {
@@ -594,7 +624,8 @@ func (p *ConnectionPool) idleReaperLoop() {
 	}
 }
 
-// reapIdleConnections closes connections that have been idle too long.
+// reapIdleConnections closes connections that have been idle too long
+// or have exceeded their MaxTTL lifetime.
 func (p *ConnectionPool) reapIdleConnections() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -602,8 +633,14 @@ func (p *ConnectionPool) reapIdleConnections() {
 	now := time.Now()
 	for deviceID, pc := range p.clients {
 		pc.mu.Lock()
-		if now.Sub(pc.client.LastUsed()) > p.config.IdleTimeout {
-			p.logger.Debug().Str("device_id", deviceID).Msg("Closing idle connection")
+		idle := now.Sub(pc.client.LastUsed()) > p.config.IdleTimeout
+		expired := p.config.MaxTTL > 0 && now.Sub(pc.createdAt) > p.config.MaxTTL
+		if idle || expired {
+			reason := "idle"
+			if expired {
+				reason = "max_ttl"
+			}
+			p.logger.Debug().Str("device_id", deviceID).Str("reason", reason).Msg("Closing connection")
 			pc.client.Disconnect()
 			delete(p.clients, deviceID)
 		}
@@ -633,14 +670,6 @@ func (p *ConnectionPool) Stats() PoolStats {
 	}
 
 	return stats
-}
-
-// PoolStats contains pool statistics.
-type PoolStats struct {
-	TotalConnections  int
-	ActiveConnections int
-	InUseConnections  int
-	MaxConnections    int
 }
 
 // HealthCheck implements the health.Checker interface.
@@ -678,12 +707,4 @@ func (p *ConnectionPool) GetDeviceHealth(deviceID string) (DeviceHealth, bool) {
 		CircuitBreakerOpen: pc.breaker.State() == gobreaker.StateOpen,
 		LastError:          pc.lastError,
 	}, true
-}
-
-// DeviceHealth contains health information for a single device.
-type DeviceHealth struct {
-	DeviceID           string
-	Connected          bool
-	CircuitBreakerOpen bool
-	LastError          error
 }

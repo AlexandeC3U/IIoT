@@ -2,6 +2,8 @@
 
 > **Technology Stack:** The backend services are primarily written in **Go** for high performance and low memory footprint. The frontend and API gateway use TypeScript. See [QUESTIONS.md](QUESTIONS.md) for detailed rationale.
 
+> **📌 Quick Reference:** For a visual overview of the production architecture, data flows, and Kubernetes deployment patterns, see [PLATFORM_ARCHITECTURE.md](PLATFORM_ARCHITECTURE.md).
+
 ## Table of Contents
 
 - [Design Principles](#design-principles)

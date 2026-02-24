@@ -14,9 +14,9 @@ infrastructure/k8s/
 │
 ├── services/                      # Per-service manifests
 │   ├── protocol-gateway/          # Industrial protocol conversion
-│   │   ├── deployment.yaml
+│   │   ├── statefulset.yaml       # StatefulSet (not Deployment - see note below)
 │   │   ├── service.yaml
-│   │   ├── hpa.yaml               # Horizontal Pod Autoscaler
+│   │   ├── pdb.yaml               # Pod Disruption Budget
 │   │   ├── serviceaccount.yaml
 │   │   ├── devices-configmap.yaml # Device configuration
 │   │   └── kustomization.yaml
@@ -105,8 +105,13 @@ kubectl port-forward -n nexus svc/emqx 18083:18083
 # TimescaleDB
 kubectl port-forward -n nexus svc/timescaledb 5432:5432
 
-# Protocol Gateway Health
-kubectl port-forward -n nexus svc/protocol-gateway 8081:8081
+# Protocol Gateway (API, health, metrics all on same port)
+kubectl port-forward -n nexus svc/protocol-gateway 8080:8080
+
+# Then access:
+# - API:     http://localhost:8080/api/devices
+# - Health:  http://localhost:8080/health
+# - Metrics: http://localhost:8080/metrics
 ```
 
 ### Ingress (Production)
@@ -116,41 +121,54 @@ See `services/emqx/service.yaml` for an example LoadBalancer configuration.
 
 ## Scaling
 
-### Manual Scaling
+### Protocol Gateway (StatefulSet - Single Replica)
+
+**⚠️ Important:** The protocol-gateway uses a StatefulSet with `replicas: 1` and **cannot** be horizontally scaled. This is by design because:
+
+- **Long-lived TCP connections**: OPC UA sessions, Modbus/S7 sockets are persistent
+- **Duplicate connections**: Multiple replicas would open duplicate connections to each PLC
+- **Session limits**: OPC UA servers have MaxSessions limits (2 pods = 2x sessions)
+- **Duplicate data**: Multiple replicas would publish duplicate data to MQTT
+- **PKI state**: Trust store must be consistent (PersistentVolume)
+
+**This is the industry standard** - Kepware, Ignition, and similar protocol gateways all run as singletons.
+
+### Data Ingestion (Deployment - Scalable)
+
+Data-ingestion is stateless and can be horizontally scaled:
 
 ```bash
-# Scale protocol-gateway to 5 replicas
-kubectl scale deployment protocol-gateway -n nexus --replicas=5
-
 # Scale data-ingestion to 3 replicas
 kubectl scale deployment data-ingestion -n nexus --replicas=3
 ```
 
 ### Automatic Scaling (HPA)
 
-Both protocol-gateway and data-ingestion have HPA configured:
+Only data-ingestion has HPA configured (protocol-gateway does not support HPA):
 
 ```bash
 # View HPA status
 kubectl get hpa -n nexus
 
 # Describe HPA details
-kubectl describe hpa protocol-gateway -n nexus
+kubectl describe hpa data-ingestion -n nexus
 ```
 
 ## Monitoring
 
-All services expose Prometheus metrics:
+All services expose Prometheus metrics on port 8080:
 
 ```bash
 # Protocol Gateway metrics
-kubectl port-forward -n nexus svc/protocol-gateway 8081:8081
-curl http://localhost:8081/metrics
+kubectl port-forward -n nexus svc/protocol-gateway 8080:8080
+curl http://localhost:8080/metrics
 
-# Data Ingestion metrics
-kubectl port-forward -n nexus svc/data-ingestion 8081:8081
-curl http://localhost:8081/metrics
+# Data Ingestion metrics  
+kubectl port-forward -n nexus svc/data-ingestion 8080:8080
+curl http://localhost:8080/metrics
 ```
+
+See `docs/PLATFORM_ARCHITECTURE.md` for the complete architecture diagram and data flows.
 
 ## Troubleshooting
 

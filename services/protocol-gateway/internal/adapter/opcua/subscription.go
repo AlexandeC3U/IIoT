@@ -4,6 +4,7 @@ package opcua
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,11 +37,13 @@ type Subscription struct {
 	ID              uint32
 	Device          *domain.Device
 	Tags            map[string]*domain.Tag
-	TagList         []*domain.Tag // Ordered list for client handle lookup
+	TagList         []*domain.Tag     // Ordered list for client handle lookup
 	MonitoredItems  map[string]uint32 // tag ID -> monitored item ID
 	LastValues      map[string]*domain.DataPoint
 	opcuaSub        *opcua.Subscription
 	notifyCh        chan *opcua.PublishNotificationData
+	doneCh          chan struct{}  // Signals notification handler to stop
+	wg              sync.WaitGroup // Waits for notification handler to exit
 	mu              sync.RWMutex
 	publishInterval time.Duration
 	active          atomic.Bool
@@ -162,6 +165,7 @@ func (sm *SubscriptionManager) Subscribe(device *domain.Device, tags []*domain.T
 		MonitoredItems:  make(map[string]uint32),
 		LastValues:      make(map[string]*domain.DataPoint),
 		notifyCh:        make(chan *opcua.PublishNotificationData, 100),
+		doneCh:          make(chan struct{}),
 		publishInterval: config.PublishInterval,
 	}
 
@@ -205,6 +209,11 @@ func (sm *SubscriptionManager) unsubscribeDeviceLocked(deviceID string) error {
 
 	sub.active.Store(false)
 
+	// Signal the notification handler to stop first
+	if sub.doneCh != nil {
+		close(sub.doneCh)
+	}
+
 	// Cancel the OPC UA subscription
 	if sub.opcuaSub != nil {
 		if err := sub.opcuaSub.Cancel(sm.ctx); err != nil {
@@ -215,7 +224,11 @@ func (sm *SubscriptionManager) unsubscribeDeviceLocked(deviceID string) error {
 		}
 	}
 
-	// Close notification channel
+	// Wait for notification handler to exit before closing channel
+	// This prevents panic from send-on-closed-channel
+	sub.wg.Wait()
+
+	// Now safe to close notification channel
 	if sub.notifyCh != nil {
 		close(sub.notifyCh)
 	}
@@ -332,7 +345,9 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 	}
 
 	// Start notification handler goroutine
+	// Add to both manager wg (for global shutdown) and sub wg (for individual unsubscribe)
 	sm.wg.Add(1)
+	sub.wg.Add(1)
 	go sm.handleNotifications(sub)
 
 	sm.logger.Info().
@@ -345,8 +360,10 @@ func (sm *SubscriptionManager) createOPCSubscription(sub *Subscription, config S
 }
 
 // handleNotifications processes notifications from the subscription channel.
+// Uses both manager context and subscription doneCh for clean shutdown.
 func (sm *SubscriptionManager) handleNotifications(sub *Subscription) {
 	defer sm.wg.Done()
+	defer sub.wg.Done() // Signal subscription that handler has exited
 
 	sm.logger.Debug().
 		Str("device_id", sub.Device.ID).
@@ -356,6 +373,12 @@ func (sm *SubscriptionManager) handleNotifications(sub *Subscription) {
 	for {
 		select {
 		case <-sm.ctx.Done():
+			return
+		case <-sub.doneCh:
+			// Subscription is being removed, exit cleanly
+			sm.logger.Debug().
+				Str("device_id", sub.Device.ID).
+				Msg("Notification handler stopping (done signal)")
 			return
 		case notif, ok := <-sub.notifyCh:
 			if !ok {
@@ -413,7 +436,24 @@ func (sm *SubscriptionManager) processDataChange(sub *Subscription, item *ua.Mon
 
 	// Convert to data point
 	dp := sm.client.processReadResult(item.Value, tag)
-	dp.Topic = fmt.Sprintf("%s/%s", sub.Device.UNSPrefix, tag.TopicSuffix)
+	suffix := strings.TrimSpace(tag.TopicSuffix)
+	if suffix == "" {
+		suffix = tag.Name
+	}
+	if strings.TrimSpace(suffix) == "" {
+		suffix = tag.ID
+	}
+	suffix = strings.TrimSpace(suffix)
+	suffix = strings.ReplaceAll(suffix, "/", "_")
+	suffix = strings.ReplaceAll(suffix, "#", "_")
+	suffix = strings.ReplaceAll(suffix, "+", "_")
+	suffix = strings.ReplaceAll(suffix, " ", "_")
+	suffix = strings.Trim(suffix, "_")
+	if suffix == "" {
+		dp.Topic = sub.Device.UNSPrefix
+	} else {
+		dp.Topic = sub.Device.UNSPrefix + "/" + suffix
+	}
 
 	// Update last value
 	sub.mu.Lock()

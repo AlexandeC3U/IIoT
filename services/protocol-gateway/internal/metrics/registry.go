@@ -8,11 +8,11 @@ import (
 
 // Registry holds all Prometheus metrics for the service.
 type Registry struct {
-	// Connection metrics
-	ActiveConnections prometheus.Gauge
-	ConnectionsTotal  prometheus.Counter
-	ConnectionErrors  prometheus.Counter
-	ConnectionLatency prometheus.Histogram
+	// Connection metrics (protocol-labeled)
+	ActiveConnectionsByProtocol *prometheus.GaugeVec
+	ConnectionsTotalByProtocol  *prometheus.CounterVec
+	ConnectionErrorsByProtocol  *prometheus.CounterVec
+	ConnectionLatencyByProtocol *prometheus.HistogramVec
 
 	// Polling metrics
 	PollsTotal            *prometheus.CounterVec
@@ -35,6 +35,22 @@ type Registry struct {
 	DevicesOnline     prometheus.Gauge
 	DeviceErrors      *prometheus.CounterVec
 
+	// S7-specific metrics
+	S7DeviceConnected  *prometheus.GaugeVec
+	S7TagErrorsTotal   *prometheus.CounterVec
+	S7ReadDuration     *prometheus.HistogramVec
+	S7WriteDuration    *prometheus.HistogramVec
+	S7BreakerState     *prometheus.GaugeVec
+
+	// Clock drift metrics
+	ClockDriftSeconds prometheus.Gauge        // Current NTP offset in seconds
+	ClockDriftChecks  *prometheus.CounterVec   // NTP check results by status (success/error)
+	OPCUAClockDrift   *prometheus.GaugeVec     // Clock drift between OPC UA server and gateway
+
+	// Certificate metrics
+	OPCUACertsTotal   *prometheus.GaugeVec     // Certificate count by store (trusted/rejected)
+	OPCUACertExpiry   *prometheus.GaugeVec     // Days until cert expiry, by fingerprint
+
 	// System metrics
 	GoroutineCount prometheus.Gauge
 	MemoryUsage    prometheus.Gauge
@@ -44,31 +60,31 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{
 		// Connection metrics
-		ActiveConnections: promauto.NewGauge(prometheus.GaugeOpts{
+		ActiveConnectionsByProtocol: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "gateway",
-			Subsystem: "modbus",
-			Name:      "active_connections",
-			Help:      "Number of active Modbus connections",
-		}),
-		ConnectionsTotal: promauto.NewCounter(prometheus.CounterOpts{
+			Subsystem: "connections",
+			Name:      "active",
+			Help:      "Number of active connections (all protocols)",
+		}, []string{"protocol"}),
+		ConnectionsTotalByProtocol: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "gateway",
-			Subsystem: "modbus",
-			Name:      "connections_total",
-			Help:      "Total number of Modbus connection attempts",
-		}),
-		ConnectionErrors: promauto.NewCounter(prometheus.CounterOpts{
+			Subsystem: "connections",
+			Name:      "attempts_total",
+			Help:      "Total number of connection attempts by protocol",
+		}, []string{"protocol"}),
+		ConnectionErrorsByProtocol: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "gateway",
-			Subsystem: "modbus",
-			Name:      "connection_errors_total",
-			Help:      "Total number of Modbus connection errors",
-		}),
-		ConnectionLatency: promauto.NewHistogram(prometheus.HistogramOpts{
+			Subsystem: "connections",
+			Name:      "errors_total",
+			Help:      "Total number of connection errors by protocol",
+		}, []string{"protocol"}),
+		ConnectionLatencyByProtocol: promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "gateway",
-			Subsystem: "modbus",
-			Name:      "connection_latency_seconds",
-			Help:      "Modbus connection establishment latency",
+			Subsystem: "connections",
+			Name:      "latency_seconds",
+			Help:      "Connection establishment latency by protocol",
 			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
-		}),
+		}, []string{"protocol"}),
 
 		// Polling metrics
 		PollsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
@@ -168,6 +184,74 @@ func NewRegistry() *Registry {
 			Help:      "Total device errors by type",
 		}, []string{"device_id", "error_type"}),
 
+		// S7-specific metrics
+		S7DeviceConnected: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "s7",
+			Name:      "device_connected",
+			Help:      "Whether the S7 device is currently connected (1=connected, 0=disconnected)",
+		}, []string{"device_id"}),
+		S7TagErrorsTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "s7",
+			Name:      "tag_errors_total",
+			Help:      "Total S7 tag read/write errors by device and tag",
+		}, []string{"device_id", "tag_id"}),
+		S7ReadDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "gateway",
+			Subsystem: "s7",
+			Name:      "read_duration_seconds",
+			Help:      "S7 read operation duration per device",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+		}, []string{"device_id"}),
+		S7WriteDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "gateway",
+			Subsystem: "s7",
+			Name:      "write_duration_seconds",
+			Help:      "S7 write operation duration per device",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+		}, []string{"device_id"}),
+		S7BreakerState: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "s7",
+			Name:      "breaker_state",
+			Help:      "S7 circuit breaker state per device (0=closed, 1=half-open, 2=open)",
+		}, []string{"device_id"}),
+
+		// Clock drift metrics
+		ClockDriftSeconds: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "system",
+			Name:      "clock_drift_seconds",
+			Help:      "Current NTP clock offset in seconds (positive = gateway ahead, negative = behind)",
+		}),
+		ClockDriftChecks: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "gateway",
+			Subsystem: "system",
+			Name:      "clock_drift_checks_total",
+			Help:      "Total NTP clock drift checks by result",
+		}, []string{"status"}),
+		OPCUAClockDrift: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "opcua",
+			Name:      "clock_drift_seconds",
+			Help:      "Clock drift between OPC UA server and gateway in seconds (positive = gateway ahead)",
+		}, []string{"device_id"}),
+
+		// Certificate metrics
+		OPCUACertsTotal: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "opcua",
+			Name:      "certs_total",
+			Help:      "Number of certificates in the trust store by store type",
+		}, []string{"store"}),
+		OPCUACertExpiry: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "gateway",
+			Subsystem: "opcua",
+			Name:      "cert_expiry_days",
+			Help:      "Days until certificate expiry (negative = already expired)",
+		}, []string{"fingerprint", "subject"}),
+
 		// System metrics
 		GoroutineCount: promauto.NewGauge(prometheus.GaugeOpts{
 			Namespace: "gateway",
@@ -226,13 +310,13 @@ func (r *Registry) UpdateMQTTBufferSize(size int) {
 	r.MQTTBufferSize.Set(float64(size))
 }
 
-// RecordConnection records a connection event.
-func (r *Registry) RecordConnection(success bool, latency float64) {
-	r.ConnectionsTotal.Inc()
+// RecordConnectionForProtocol records a connection attempt for a specific protocol.
+func (r *Registry) RecordConnectionForProtocol(protocol string, success bool, latency float64) {
+	r.ConnectionsTotalByProtocol.WithLabelValues(protocol).Inc()
 	if !success {
-		r.ConnectionErrors.Inc()
+		r.ConnectionErrorsByProtocol.WithLabelValues(protocol).Inc()
 	}
-	r.ConnectionLatency.Observe(latency)
+	r.ConnectionLatencyByProtocol.WithLabelValues(protocol).Observe(latency)
 }
 
 // UpdateDeviceCount updates the device count gauges.
@@ -241,7 +325,63 @@ func (r *Registry) UpdateDeviceCount(registered, online int) {
 	r.DevicesOnline.Set(float64(online))
 }
 
-// UpdateActiveConnections updates the active connections gauge.
-func (r *Registry) UpdateActiveConnections(count int) {
-	r.ActiveConnections.Set(float64(count))
+// UpdateActiveConnectionsForProtocol updates the active connection gauge for a specific protocol.
+func (r *Registry) UpdateActiveConnectionsForProtocol(protocol string, count int) {
+	r.ActiveConnectionsByProtocol.WithLabelValues(protocol).Set(float64(count))
+}
+
+// RecordS7DeviceConnected updates the S7 device connection state gauge.
+func (r *Registry) RecordS7DeviceConnected(deviceID string, connected bool) {
+	val := 0.0
+	if connected {
+		val = 1.0
+	}
+	r.S7DeviceConnected.WithLabelValues(deviceID).Set(val)
+}
+
+// RecordS7TagError increments the S7 tag error counter.
+func (r *Registry) RecordS7TagError(deviceID, tagID string) {
+	r.S7TagErrorsTotal.WithLabelValues(deviceID, tagID).Inc()
+}
+
+// RecordS7ReadDuration records an S7 read operation duration.
+func (r *Registry) RecordS7ReadDuration(deviceID string, duration float64) {
+	r.S7ReadDuration.WithLabelValues(deviceID).Observe(duration)
+}
+
+// RecordS7WriteDuration records an S7 write operation duration.
+func (r *Registry) RecordS7WriteDuration(deviceID string, duration float64) {
+	r.S7WriteDuration.WithLabelValues(deviceID).Observe(duration)
+}
+
+// RecordS7BreakerState updates the S7 circuit breaker state gauge.
+// 0=closed (normal), 1=half-open (probing), 2=open (blocking).
+func (r *Registry) RecordS7BreakerState(deviceID string, state int) {
+	r.S7BreakerState.WithLabelValues(deviceID).Set(float64(state))
+}
+
+// RecordClockDrift records the current NTP clock offset.
+func (r *Registry) RecordClockDrift(offsetSeconds float64, success bool) {
+	if success {
+		r.ClockDriftSeconds.Set(offsetSeconds)
+		r.ClockDriftChecks.WithLabelValues("success").Inc()
+	} else {
+		r.ClockDriftChecks.WithLabelValues("error").Inc()
+	}
+}
+
+// RecordOPCUAClockDrift records the clock drift between an OPC UA server and the gateway.
+func (r *Registry) RecordOPCUAClockDrift(deviceID string, driftSeconds float64) {
+	r.OPCUAClockDrift.WithLabelValues(deviceID).Set(driftSeconds)
+}
+
+// UpdateOPCUACertCounts updates the certificate count gauges.
+func (r *Registry) UpdateOPCUACertCounts(trustedCount, rejectedCount int) {
+	r.OPCUACertsTotal.WithLabelValues("trusted").Set(float64(trustedCount))
+	r.OPCUACertsTotal.WithLabelValues("rejected").Set(float64(rejectedCount))
+}
+
+// RecordOPCUACertExpiry records the days until a certificate expires.
+func (r *Registry) RecordOPCUACertExpiry(fingerprint, subject string, daysUntilExpiry int) {
+	r.OPCUACertExpiry.WithLabelValues(fingerprint, subject).Set(float64(daysUntilExpiry))
 }

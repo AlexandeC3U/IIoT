@@ -2,13 +2,29 @@
 
 A high-performance, multi-protocol industrial data gateway written in Go. Connects to industrial devices (PLCs, sensors, SCADA systems) and publishes data to MQTT using the Unified Namespace (UNS) pattern.
 
+> **Architecture Reference**: See [PLATFORM_ARCHITECTURE.md](../../PLATFORM_ARCHITECTURE.md) for the complete system architecture and data flows.
+
 ## Features
 
 - **Multi-Protocol Support**: Modbus TCP/RTU, OPC UA, Siemens S7
 - **Bidirectional Communication**: Read from and write to devices
-- **Connection Pooling**: Efficient connection management with circuit breakers
-- **Horizontal Scaling**: Run multiple instances for high device counts
-- **Production-Ready**: Health checks, metrics, structured logging
+- **Connection Pooling**: Efficient connection management with per-device circuit breakers
+- **OPC UA Subscriptions**: Push-based data delivery for high-frequency tags
+- **OPC UA Address Space Browse**: Explore server nodes via REST API
+- **OPC UA Certificate Management**: PKI trust store with REST API
+- **REST API**: Device management, browse, test-connection endpoints
+- **NTP Clock Drift Monitoring**: Detect time sync issues with industrial devices
+- **Production-Ready**: Health checks, Prometheus metrics, structured logging
+
+## Deployment Model
+
+**⚠️ Important**: This service runs as a **StatefulSet with 1 replica** in Kubernetes. It cannot be horizontally scaled because:
+- Long-lived TCP connections to industrial devices
+- Multiple replicas would cause duplicate connections to PLCs
+- OPC UA session limits would be exceeded
+- PKI trust store requires persistent storage
+
+This is the industry standard pattern - Kepware, Ignition, and similar gateways run as singletons.
 
 ## Architecture Overview
 
@@ -205,7 +221,10 @@ services/protocol-gateway/
 | Node ID Caching | ✅ |
 | Security Policies | ✅ |
 | Authentication (Anon/User/Cert) | ✅ |
-| Subscriptions (Report-by-Exception) | ✅ (not yet wired) |
+| Subscriptions (Report-by-Exception) | ✅ |
+| Address Space Browse | ✅ |
+| PKI Trust Store | ✅ |
+| Clock Drift Detection | ✅ |
 
 **Documentation**: [docs/services/protocol-gateway/OPCUA.md](../../docs/services/protocol-gateway/OPCUA.md)
 
@@ -290,21 +309,25 @@ services/protocol-gateway/
 }
 ```
 
-## Scaling
+## Scaling & Deployment
 
-### Single Instance (Up to ~200 devices)
+### Single Instance (Recommended)
+
+A single protocol-gateway instance can handle **200+ OPC UA devices** and **500+ Modbus devices** comfortably. The bottleneck is the PLCs, not the gateway.
 
 ```yaml
 # One gateway handles all devices
 protocol-gateway:
-  replicas: 1
-  devices: config/all-devices.yaml
+  replicas: 1  # Always 1 - cannot horizontally scale
+  devices: config/devices.yaml
 ```
 
-### Multiple Instances (200+ devices)
+### Device Sharding (Large Deployments)
+
+For very large deployments (1000+ devices), use separate gateway instances with device partitioning:
 
 ```yaml
-# Split by plant/line
+# Split by plant/line - each is still replicas: 1
 protocol-gateway-plant-a:
   replicas: 1
   devices: config/devices-plant-a.yaml
@@ -314,43 +337,87 @@ protocol-gateway-plant-b:
   devices: config/devices-plant-b.yaml
 ```
 
-### Kubernetes Deployment
+### Kubernetes StatefulSet
 
 ```yaml
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet  # Not Deployment!
 metadata:
   name: protocol-gateway
 spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: protocol-gateway
+  replicas: 1  # Must be 1 - see deployment model above
+  serviceName: protocol-gateway
   template:
     spec:
+      terminationGracePeriodSeconds: 35
       containers:
         - name: gateway
           image: nexus/protocol-gateway:latest
+          ports:
+            - containerPort: 8080
+              name: http
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
+              memory: "256Mi"
+              cpu: "250m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1000m"
           livenessProbe:
             httpGet:
               path: /health/live
               port: 8080
+            periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /health/ready
               port: 8080
+            periodSeconds: 10
+          volumeMounts:
+            - name: pki-store
+              mountPath: /app/certs/pki
+  volumeClaimTemplates:
+    - metadata:
+        name: pki-store
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Mi
 ```
+
+## REST API
+
+### Device Management
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/devices` | List all configured devices |
+| `GET /api/devices/{id}` | Get device by ID |
+| `POST /api/devices` | Add a new device |
+| `PUT /api/devices/{id}` | Update device configuration |
+| `DELETE /api/devices/{id}` | Remove a device |
+| `POST /api/devices/{id}/test` | Test device connection |
+
+### OPC UA Specific
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/browse` | Browse OPC UA address space |
+| `GET /api/opcua/certificates` | List PKI trust store certificates |
+| `POST /api/opcua/certificates/trust` | Trust a certificate |
+| `POST /api/opcua/certificates/reject` | Reject a certificate |
+
+### Topics & Logging
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/topics` | List active MQTT topics |
+| `GET /api/logs` | Recent log entries |
 
 ## Monitoring
 
-### Endpoints
+### Health Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
@@ -514,9 +581,11 @@ MIT License - See [LICENSE](../../LICENSE) for details.
 
 ## Related Documentation
 
-- [Architecture Overview](../../docs/ARCHITECTURE.md)
-- [Questions & Decisions](../../docs/QUESTIONS.md)
-- [Modbus Adapter](../../docs/services/protocol-gateway/MODBUS.md)
-- [OPC UA Adapter](../../docs/services/protocol-gateway/OPCUA.md)
-- [S7 Adapter](../../docs/services/protocol-gateway/S7.md)
+- [Platform Architecture (Full Diagram)](../../PLATFORM_ARCHITECTURE.md)
+- [Architecture Overview](../../ARCHITECTURE.md)
+- [Questions & Decisions](../../QUESTIONS.md)
+- [Modbus Adapter](MODBUS.md)
+- [OPC UA Adapter](OPCUA.md)
+- [S7 Adapter](S7.md)
+- [Protocol Gateway TODO](../../../services/protocol-gateway/TODO.md)
 

@@ -37,12 +37,22 @@ type ConnectionConfig struct {
 	SlaveID int `yaml:"slave_id"`
 
 	// OPC UA
-	OPCEndpointURL    string `yaml:"opc_endpoint_url"`
-	OPCSecurityPolicy string `yaml:"opc_security_policy"`
-	OPCSecurityMode   string `yaml:"opc_security_mode"`
-	OPCAuthMode       string `yaml:"opc_auth_mode"`
-	OPCUsername       string `yaml:"opc_username"`
-	OPCPassword       string `yaml:"opc_password"`
+	OPCEndpointURL        string `yaml:"opc_endpoint_url"`
+	OPCSecurityPolicy     string `yaml:"opc_security_policy"`
+	OPCSecurityMode       string `yaml:"opc_security_mode"`
+	OPCAuthMode           string `yaml:"opc_auth_mode"`
+	OPCUsername           string `yaml:"opc_username"`
+	OPCPassword           string `yaml:"opc_password"`
+	OPCCertFile           string `yaml:"opc_cert_file"`
+	OPCKeyFile            string `yaml:"opc_key_file"`
+	OPCServerCertFile     string `yaml:"opc_server_cert_file"`
+	OPCInsecureSkipVerify bool   `yaml:"opc_insecure_skip_verify"`
+	OPCAutoSelectEndpoint bool   `yaml:"opc_auto_select_endpoint"`
+	OPCApplicationName    string `yaml:"opc_application_name"`
+	OPCApplicationURI     string `yaml:"opc_application_uri"`
+	OPCUseSubscriptions   *bool  `yaml:"opc_use_subscriptions"`
+	OPCPublishInterval    string `yaml:"opc_publish_interval"`
+	OPCSamplingInterval   string `yaml:"opc_sampling_interval"`
 
 	// S7
 	S7Rack int `yaml:"s7_rack"`
@@ -98,8 +108,22 @@ func LoadDevices(path string) ([]*domain.Device, error) {
 		return nil, fmt.Errorf("failed to parse devices file: %w", err)
 	}
 
+	// Track seen IDs to detect duplicates
+	seenIDs := make(map[string]int)
 	devices := make([]*domain.Device, 0, len(file.Devices))
-	for _, dc := range file.Devices {
+
+	for idx, dc := range file.Devices {
+		// Check for duplicate IDs
+		if prevIdx, exists := seenIDs[dc.ID]; exists {
+			return nil, fmt.Errorf("duplicate device ID '%s' at index %d (first seen at index %d)", dc.ID, idx, prevIdx)
+		}
+		seenIDs[dc.ID] = idx
+
+		// Validate protocol-specific connection requirements
+		if err := validateConnectionConfig(dc); err != nil {
+			return nil, fmt.Errorf("error in device %s: %w", dc.ID, err)
+		}
+
 		device, err := convertDeviceConfig(dc)
 		if err != nil {
 			return nil, fmt.Errorf("error in device %s: %w", dc.ID, err)
@@ -108,6 +132,45 @@ func LoadDevices(path string) ([]*domain.Device, error) {
 	}
 
 	return devices, nil
+}
+
+// validateConnectionConfig validates protocol-specific connection requirements.
+func validateConnectionConfig(dc DeviceConfig) error {
+	protocol := domain.Protocol(dc.Protocol)
+
+	switch protocol {
+	case domain.ProtocolModbusTCP, domain.ProtocolModbusRTU:
+		if dc.Connection.Host == "" {
+			return fmt.Errorf("modbus device requires host")
+		}
+		if dc.Connection.Port == 0 {
+			return fmt.Errorf("modbus device requires port")
+		}
+		if dc.Connection.SlaveID < 1 || dc.Connection.SlaveID > 247 {
+			return fmt.Errorf("modbus slave_id must be between 1 and 247, got %d", dc.Connection.SlaveID)
+		}
+
+	case domain.ProtocolOPCUA:
+		if dc.Connection.OPCEndpointURL == "" {
+			return fmt.Errorf("OPC UA device requires opc_endpoint_url")
+		}
+
+	case domain.ProtocolS7:
+		if dc.Connection.Host == "" {
+			return fmt.Errorf("S7 device requires host")
+		}
+		if dc.Connection.S7Rack < 0 {
+			return fmt.Errorf("S7 rack must be non-negative")
+		}
+		if dc.Connection.S7Slot < 0 {
+			return fmt.Errorf("S7 slot must be non-negative")
+		}
+
+	default:
+		// Unknown protocol - let domain validation handle it
+	}
+
+	return nil
 }
 
 // convertDeviceConfig converts a DeviceConfig to a domain.Device.
@@ -129,6 +192,24 @@ func convertDeviceConfig(dc DeviceConfig) (*domain.Device, error) {
 		retryDelay, err = time.ParseDuration(dc.Connection.RetryDelay)
 		if err != nil {
 			return nil, fmt.Errorf("invalid retry delay: %w", err)
+		}
+	}
+
+	// Parse OPC UA subscription intervals
+	var opcPublishInterval time.Duration
+	if dc.Connection.OPCPublishInterval != "" {
+		var err error
+		opcPublishInterval, err = time.ParseDuration(dc.Connection.OPCPublishInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid opc_publish_interval: %w", err)
+		}
+	}
+	var opcSamplingInterval time.Duration
+	if dc.Connection.OPCSamplingInterval != "" {
+		var err error
+		opcSamplingInterval, err = time.ParseDuration(dc.Connection.OPCSamplingInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid opc_sampling_interval: %w", err)
 		}
 	}
 
@@ -174,12 +255,22 @@ func convertDeviceConfig(dc DeviceConfig) (*domain.Device, error) {
 			SlaveID: uint8(dc.Connection.SlaveID),
 
 			// OPC UA
-			OPCEndpointURL:    dc.Connection.OPCEndpointURL,
-			OPCSecurityPolicy: dc.Connection.OPCSecurityPolicy,
-			OPCSecurityMode:   dc.Connection.OPCSecurityMode,
-			OPCAuthMode:       dc.Connection.OPCAuthMode,
-			OPCUsername:       dc.Connection.OPCUsername,
-			OPCPassword:       dc.Connection.OPCPassword,
+			OPCEndpointURL:        dc.Connection.OPCEndpointURL,
+			OPCSecurityPolicy:     dc.Connection.OPCSecurityPolicy,
+			OPCSecurityMode:       dc.Connection.OPCSecurityMode,
+			OPCAuthMode:           dc.Connection.OPCAuthMode,
+			OPCUsername:           dc.Connection.OPCUsername,
+			OPCPassword:           dc.Connection.OPCPassword,
+			OPCCertFile:           dc.Connection.OPCCertFile,
+			OPCKeyFile:            dc.Connection.OPCKeyFile,
+			OPCServerCertFile:     dc.Connection.OPCServerCertFile,
+			OPCInsecureSkipVerify: dc.Connection.OPCInsecureSkipVerify,
+			OPCAutoSelectEndpoint: dc.Connection.OPCAutoSelectEndpoint,
+			OPCApplicationName:    dc.Connection.OPCApplicationName,
+			OPCApplicationURI:     dc.Connection.OPCApplicationURI,
+			OPCUseSubscriptions:   opcUseSubscriptions(dc),
+			OPCPublishInterval:    opcPublishInterval,
+			OPCSamplingInterval:   opcSamplingInterval,
 
 			// S7
 			S7Rack: dc.Connection.S7Rack,
@@ -288,7 +379,8 @@ func SaveDevices(path string, devices []*domain.Device) error {
 		return fmt.Errorf("failed to marshal devices: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Use 0600 permissions to protect credentials from other local users
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("failed to write devices file: %w", err)
 	}
 
@@ -303,12 +395,13 @@ func convertToDeviceConfig(device *domain.Device) DeviceConfig {
 	}
 
 	return DeviceConfig{
-		ID:          device.ID,
-		Name:        device.Name,
-		Description: device.Description,
-		Protocol:    string(device.Protocol),
-		Enabled:     device.Enabled,
-		UNSPrefix:   device.UNSPrefix,
+		ID:           device.ID,
+		Name:         device.Name,
+		Description:  device.Description,
+		Protocol:     string(device.Protocol),
+		Enabled:      device.Enabled,
+		UNSPrefix:    device.UNSPrefix,
+		PollInterval: device.PollInterval.String(),
 		Connection: ConnectionConfig{
 			Host:       device.Connection.Host,
 			Port:       device.Connection.Port,
@@ -316,6 +409,28 @@ func convertToDeviceConfig(device *domain.Device) DeviceConfig {
 			Timeout:    device.Connection.Timeout.String(),
 			RetryCount: device.Connection.RetryCount,
 			RetryDelay: device.Connection.RetryDelay.String(),
+
+			// OPC UA
+			OPCEndpointURL:        device.Connection.OPCEndpointURL,
+			OPCSecurityPolicy:     device.Connection.OPCSecurityPolicy,
+			OPCSecurityMode:       device.Connection.OPCSecurityMode,
+			OPCAuthMode:           device.Connection.OPCAuthMode,
+			OPCUsername:           device.Connection.OPCUsername,
+			OPCPassword:           device.Connection.OPCPassword,
+			OPCCertFile:           device.Connection.OPCCertFile,
+			OPCKeyFile:            device.Connection.OPCKeyFile,
+			OPCServerCertFile:     device.Connection.OPCServerCertFile,
+			OPCInsecureSkipVerify: device.Connection.OPCInsecureSkipVerify,
+			OPCAutoSelectEndpoint: device.Connection.OPCAutoSelectEndpoint,
+			OPCApplicationName:    device.Connection.OPCApplicationName,
+			OPCApplicationURI:     device.Connection.OPCApplicationURI,
+			OPCUseSubscriptions:   boolPtr(device.Connection.OPCUseSubscriptions),
+			OPCPublishInterval:    durationToString(device.Connection.OPCPublishInterval),
+			OPCSamplingInterval:   durationToString(device.Connection.OPCSamplingInterval),
+
+			// S7
+			S7Rack: device.Connection.S7Rack,
+			S7Slot: device.Connection.S7Slot,
 		},
 		Tags:     tags,
 		Metadata: device.Metadata,
@@ -353,7 +468,36 @@ func convertToTagConfig(tag *domain.Tag) TagConfig {
 		DeadbandType:  string(tag.DeadbandType),
 		DeadbandValue: tag.DeadbandValue,
 		Enabled:       tag.Enabled,
+		AccessMode:    string(tag.AccessMode),
 		Metadata:      tag.Metadata,
+
+		// OPC UA
+		OPCNodeID: tag.OPCNodeID,
+
+		// S7
+		S7Address: tag.S7Address,
 	}
 }
 
+// durationToString converts a duration to string, returning empty string for zero.
+func durationToString(d time.Duration) string {
+	if d == 0 {
+		return ""
+	}
+	return d.String()
+}
+
+// opcUseSubscriptions resolves the OPCUseSubscriptions setting.
+// If explicitly set in YAML, use that value. If absent (nil), default to true for OPC UA devices.
+func opcUseSubscriptions(dc DeviceConfig) bool {
+	if dc.Connection.OPCUseSubscriptions != nil {
+		return *dc.Connection.OPCUseSubscriptions
+	}
+	// Default to true for OPC UA protocol
+	return domain.Protocol(dc.Protocol) == domain.ProtocolOPCUA
+}
+
+// boolPtr returns a pointer to a bool value.
+func boolPtr(b bool) *bool {
+	return &b
+}

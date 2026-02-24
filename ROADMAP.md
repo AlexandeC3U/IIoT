@@ -133,11 +133,11 @@ Build a **lightweight, scalable, and production-ready** Industrial IoT platform 
 | ------------------------------ | ------------- | ----------------------------------------------- |
 | **Kubernetes Manifests**       | ✅ Complete   | Kustomize-based organization                    |
 | ├─ Base Resources              | ✅ Complete   | Namespace, ConfigMaps, Secrets                  |
-| ├─ Protocol Gateway            | ✅ Complete   | Deployment, HPA, PDB, ServiceAccount            |
+| ├─ Protocol Gateway            | ✅ Complete   | StatefulSet (1 replica), PDB, PVC for PKI       |
 | ├─ Data Ingestion              | ✅ Complete   | Deployment, HPA, PDB, ServiceAccount            |
 | ├─ EMQX Cluster                | ✅ Complete   | StatefulSet (3 nodes), DNS discovery            |
 | └─ TimescaleDB                 | ✅ Complete   | StatefulSet with PVC                            |
-| **Horizontal Pod Autoscaling** | ✅ Complete   | CPU/Memory based scaling                        |
+| **Horizontal Pod Autoscaling** | ✅ Complete   | CPU/Memory based (data-ingestion only)          |
 | **Pod Disruption Budgets**     | ✅ Complete   | Safe rolling updates                            |
 | **Service Accounts + RBAC**    | ✅ Complete   | Minimal permissions                             |
 | **Environment Overlays**       | ✅ Complete   | Dev/Prod configurations                         |
@@ -174,16 +174,17 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    HORIZONTAL SCALING BEHAVIOR                              │
+│                    SCALING BEHAVIOR                                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  Protocol Gateway:                                                          │
-│  ├── Min replicas: 2 (dev: 1)                                               │
-│  ├── Max replicas: 10                                                       │
-│  ├── Scale up: CPU > 70% or Memory > 80%                                    │
-│  └── Each pod handles ~500 devices at 1s poll interval                      │
+│  Protocol Gateway (StatefulSet - NOT horizontally scalable):                │
+│  ├── Replicas: 1 (always - cannot scale horizontally)                       │
+│  ├── Handles 200+ OPC UA devices, 500+ Modbus devices                       │
+│  ├── PersistentVolume for PKI trust store                                   │
+│  ├── Long-lived TCP connections (scaling would duplicate)                   │
+│  └── For larger deployments: use device sharding (multiple gateways)        │
 │                                                                             │
-│  Data Ingestion:                                                            │
+│  Data Ingestion (Deployment - horizontally scalable):                       │
 │  ├── Min replicas: 2 (dev: 1)                                               │
 │  ├── Max replicas: 10                                                       │
 │  ├── Scale up: CPU > 70% or Memory > 80%                                    │
@@ -206,6 +207,22 @@ kubectl apply -k infrastructure/k8s/overlays/prod
 | sync.Pool for slices  | Reduced GC pressure during high-rate polling               |
 | Bounded command queue | Memory-safe under command bursts                           |
 | Enhanced metrics      | skipped_polls, worker_pool_utilization, per-device latency |
+
+### Protocol Gateway V2 Migration (January 2026) ✅
+
+The protocol gateway was completely rewritten as V2 with enhanced features:
+
+| Enhancement | Description |
+|-------------|-------------|
+| **OPC UA Subscriptions** | Push-based data delivery (Report-by-Exception) |
+| **Address Space Browse** | REST API to explore OPC UA server nodes |
+| **PKI Trust Store** | Certificate management with REST API |
+| **NTP Clock Drift** | Detect time sync issues with devices |
+| **Enhanced Metrics** | Protocol-labeled connections, S7-specific metrics |
+| **Load Shaping** | Brownout mode for overloaded servers |
+| **StatefulSet Pattern** | Single replica with PVC for PKI storage |
+
+See `docs/PLATFORM_ARCHITECTURE.md` for the complete architecture diagram.
 
 ### Protocol Gateway Hardening (January 2026) ✅
 
@@ -910,10 +927,12 @@ The Web UI is designed as a **single React application** that grows with each ph
 
 ## 🔗 Related Documents
 
+- [PLATFORM_ARCHITECTURE.md](docs/PLATFORM_ARCHITECTURE.md) - Complete system architecture diagram
 - [QUESTIONS.md](docs/QUESTIONS.md) - Architectural decisions and Q&A
 - [infrastructure.md](infrastructure/infrastructure.md) - Infrastructure details
 - [K8s README](infrastructure/k8s/README.md) - Kubernetes deployment guide
 - [Protocol Gateway README](docs/services/protocol-gateway/readme.md) - Gateway documentation
+- [Protocol Gateway TODO](services/protocol-gateway/TODO.md) - Future improvements
 - [Testing Guide](testing/services/data-ingestion.md) - Testing procedures
 
 ---
