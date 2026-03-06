@@ -13,8 +13,6 @@
 #   - TimescaleDB: localhost:5432
 #   - EMQX Dashboard: http://localhost:18083 (admin/public)
 
-version: '3.8'
-
 services:
   # ================================================
   # EMQX MQTT Broker
@@ -46,7 +44,7 @@ services:
   # TimescaleDB (Historian Database)
   # ================================================
   timescaledb:
-    image: timescale/timescaledb:latest-pg15
+    image: timescale/timescaledb:2.17.2-pg15
     container_name: nexus-timescaledb
     ports:
       - "5432:5432"

@@ -6,20 +6,19 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nexus-edge/data-ingestion/internal/adapter/mqtt"
-	"github.com/nexus-edge/data-ingestion/internal/adapter/timescaledb"
+	"github.com/nexus-edge/data-ingestion/internal/domain"
 	"github.com/rs/zerolog"
 )
 
 // Checker provides health check endpoints
 type Checker struct {
-	subscriber *mqtt.Subscriber
-	writer     *timescaledb.Writer
+	subscriber domain.MQTTSubscriber
+	writer     domain.BatchWriter
 	logger     zerolog.Logger
 }
 
 // NewChecker creates a new health checker
-func NewChecker(subscriber *mqtt.Subscriber, writer *timescaledb.Writer, logger zerolog.Logger) *Checker {
+func NewChecker(subscriber domain.MQTTSubscriber, writer domain.BatchWriter, logger zerolog.Logger) *Checker {
 	return &Checker{
 		subscriber: subscriber,
 		writer:     writer,

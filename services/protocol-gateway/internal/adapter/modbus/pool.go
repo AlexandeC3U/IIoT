@@ -21,6 +21,7 @@ type ConnectionPool struct {
 	logger  zerolog.Logger
 	metrics *metrics.Registry
 	closed  bool
+	done    chan struct{} // Closed on shutdown to unblock background loops immediately
 	wg      sync.WaitGroup
 }
 
@@ -57,6 +58,7 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 		clients: make(map[string]*pooledClient),
 		logger:  logger.With().Str("component", "modbus-pool").Logger(),
 		metrics: metricsReg,
+		done:    make(chan struct{}),
 	}
 
 	// Start background health checker
@@ -244,7 +246,6 @@ func (p *ConnectionPool) ReadTags(ctx context.Context, device *domain.Device, ta
 	result, err := pc.breaker.Execute(func() (interface{}, error) {
 		return client.ReadTags(ctx, tags)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -277,7 +278,6 @@ func (p *ConnectionPool) ReadTag(ctx context.Context, device *domain.Device, tag
 	result, err := pc.breaker.Execute(func() (interface{}, error) {
 		return client.ReadTag(ctx, tag)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, domain.ErrCircuitBreakerOpen
@@ -310,7 +310,6 @@ func (p *ConnectionPool) WriteTag(ctx context.Context, device *domain.Device, ta
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
 		return nil, client.WriteTag(ctx, tag, value)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -343,7 +342,6 @@ func (p *ConnectionPool) WriteSingleCoil(ctx context.Context, device *domain.Dev
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
 		return nil, client.WriteSingleCoil(ctx, address, value)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -376,7 +374,6 @@ func (p *ConnectionPool) WriteSingleRegister(ctx context.Context, device *domain
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
 		return nil, client.WriteSingleRegister(ctx, address, value)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -409,7 +406,6 @@ func (p *ConnectionPool) WriteMultipleRegisters(ctx context.Context, device *dom
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
 		return nil, client.WriteMultipleRegisters(ctx, address, values)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -442,7 +438,6 @@ func (p *ConnectionPool) WriteMultipleCoils(ctx context.Context, device *domain.
 	_, err = pc.breaker.Execute(func() (interface{}, error) {
 		return nil, client.WriteMultipleCoils(ctx, address, values)
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return domain.ErrCircuitBreakerOpen
@@ -480,6 +475,7 @@ func (p *ConnectionPool) RemoveClient(deviceID string) error {
 func (p *ConnectionPool) Close() error {
 	p.mu.Lock()
 	p.closed = true
+	close(p.done) // Unblock healthCheckLoop and idleReaperLoop immediately
 	p.mu.Unlock()
 
 	// Wait for background goroutines to stop
@@ -513,6 +509,8 @@ func (p *ConnectionPool) healthCheckLoop() {
 
 	for {
 		select {
+		case <-p.done:
+			return
 		case <-ticker.C:
 			p.mu.RLock()
 			if p.closed {
@@ -611,6 +609,8 @@ func (p *ConnectionPool) idleReaperLoop() {
 
 	for {
 		select {
+		case <-p.done:
+			return
 		case <-ticker.C:
 			p.mu.RLock()
 			if p.closed {

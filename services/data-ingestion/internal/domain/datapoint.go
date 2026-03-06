@@ -1,10 +1,24 @@
 package domain
 
 import (
-	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
+
+const (
+	MaxTopicLength   = 1024
+	MaxPayloadSize   = 65536 // 64 KB
+	MaxValueStrLen   = 4096
+	MaxTimestampSkew = 1 * time.Hour
+)
+
+// DefaultBatchCapacity is the fallback pre-allocation size for pooled batches.
+// Callers that know their configured BatchSize should use AcquireBatchWithCap
+// instead so the pool matches the actual workload.
+const DefaultBatchCapacity = 5000
 
 // Object pools to reduce GC pressure in high-throughput scenarios
 var (
@@ -12,7 +26,7 @@ var (
 		New: func() interface{} { return &DataPoint{} },
 	}
 	batchPool = sync.Pool{
-		New: func() interface{} { return &Batch{Points: make([]*DataPoint, 0, 5000)} },
+		New: func() interface{} { return &Batch{Points: make([]*DataPoint, 0, DefaultBatchCapacity)} },
 	}
 )
 
@@ -66,47 +80,67 @@ type MQTTPayload struct {
 
 // ParsePayload parses an MQTT message payload into a DataPoint
 func ParsePayload(topic string, payload []byte, receivedAt time.Time) (*DataPoint, error) {
+	// Pre-acquisition guards — nothing to release on failure yet.
+	if len(payload) > MaxPayloadSize {
+		return nil, fmt.Errorf("payload too large: %d bytes (max %d)", len(payload), MaxPayloadSize)
+	}
+	if len(topic) > MaxTopicLength {
+		return nil, fmt.Errorf("topic too long: %d chars (max %d)", len(topic), MaxTopicLength)
+	}
+
 	var p MQTTPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
 	}
 
-	dp := &DataPoint{
-		Topic:      topic,
-		DeviceID:   p.DeviceID,
-		TagID:      p.TagID,
-		Unit:       p.Unit,
-		ReceivedAt: receivedAt,
-	}
+	dp := AcquireDataPoint()
+	dp.Topic = topic
+	dp.DeviceID = p.DeviceID
+	dp.TagID = p.TagID
+	dp.Unit = p.Unit
+	dp.ReceivedAt = receivedAt
 
-	// Parse value - can be numeric or string
+	// Parse value - can be numeric, string, or bool.
+	// json.Unmarshal always decodes JSON numbers as float64, so int/int64 cases
+	// are unreachable and have been removed.
 	switch v := p.Value.(type) {
 	case float64:
 		dp.Value = &v
-	case int:
-		f := float64(v)
-		dp.Value = &f
-	case int64:
-		f := float64(v)
-		dp.Value = &f
 	case string:
 		dp.ValueStr = &v
 	case bool:
+		var f float64
 		if v {
-			f := float64(1)
-			dp.Value = &f
-		} else {
-			f := float64(0)
-			dp.Value = &f
+			f = 1
 		}
+		dp.Value = &f
+	}
+
+	// Post-acquisition validation — must release dp before returning an error.
+	if dp.Value == nil && dp.ValueStr == nil {
+		ReleaseDataPoint(dp)
+		return nil, fmt.Errorf("neither value nor value_str present")
+	}
+	if dp.ValueStr != nil && len(*dp.ValueStr) > MaxValueStrLen {
+		n := len(*dp.ValueStr)
+		ReleaseDataPoint(dp)
+		return nil, fmt.Errorf("value_str too long: %d chars (max %d)", n, MaxValueStrLen)
 	}
 
 	// Parse quality string to OPC UA quality code
 	dp.Quality = qualityStringToCode(p.Quality)
 
-	// Parse timestamp from unix milliseconds
+	// Parse timestamp from unix milliseconds, validate skew.
 	if p.Timestamp > 0 {
 		dp.Timestamp = time.UnixMilli(p.Timestamp)
+		if dp.Timestamp.After(receivedAt.Add(MaxTimestampSkew)) {
+			ReleaseDataPoint(dp)
+			return nil, fmt.Errorf("timestamp too far in future: %v", dp.Timestamp)
+		}
+		if dp.Timestamp.Before(receivedAt.Add(-30 * 24 * time.Hour)) {
+			ReleaseDataPoint(dp)
+			return nil, fmt.Errorf("timestamp too old: %v", dp.Timestamp)
+		}
 	} else {
 		dp.Timestamp = receivedAt
 	}
@@ -150,12 +184,22 @@ func NewBatch(capacity int) *Batch {
 	}
 }
 
-// AcquireBatch gets a Batch from the pool and initializes it.
-// This reduces GC pressure in high-throughput scenarios.
-// Remember to call ReleaseBatch() when done.
-func AcquireBatch(capacity int) *Batch {
+// AcquireBatch gets a Batch from the pool with the default capacity.
+// Prefer AcquireBatchWithCap when the configured BatchSize is known.
+func AcquireBatch() *Batch {
+	return AcquireBatchWithCap(0)
+}
+
+// AcquireBatchWithCap gets a Batch from the pool and ensures it has at
+// least the given capacity.  If cap is 0, the pool's default is used.
+// This avoids wasting memory when BatchSize is small, and avoids extra
+// allocations when BatchSize exceeds the pool's default.
+func AcquireBatchWithCap(capacity int) *Batch {
 	b := batchPool.Get().(*Batch)
-	b.Points = b.Points[:0] // Reset length but keep capacity
+	b.Points = b.Points[:0]
+	if capacity > 0 && cap(b.Points) < capacity {
+		b.Points = make([]*DataPoint, 0, capacity)
+	}
 	b.CreatedAt = time.Now()
 	return b
 }
@@ -166,8 +210,10 @@ func ReleaseBatch(b *Batch) {
 	if b == nil {
 		return
 	}
-	// Clear references to allow GC of DataPoint objects
+	// Return each DataPoint to its pool, then nil the slot so the batch
+	// slice does not prevent the underlying memory from being reused.
 	for i := range b.Points {
+		ReleaseDataPoint(b.Points[i])
 		b.Points[i] = nil
 	}
 	b.Points = b.Points[:0]

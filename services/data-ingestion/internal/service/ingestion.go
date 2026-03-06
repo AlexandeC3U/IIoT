@@ -8,8 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nexus-edge/data-ingestion/internal/adapter/mqtt"
-	"github.com/nexus-edge/data-ingestion/internal/adapter/timescaledb"
 	"github.com/nexus-edge/data-ingestion/internal/domain"
 	"github.com/nexus-edge/data-ingestion/internal/metrics"
 	"github.com/rs/zerolog"
@@ -26,8 +24,8 @@ type IngestionConfig struct {
 // IngestionService orchestrates data ingestion from MQTT to TimescaleDB
 type IngestionService struct {
 	config     IngestionConfig
-	subscriber *mqtt.Subscriber
-	writer     *timescaledb.Writer
+	subscriber domain.MQTTSubscriber
+	writer     domain.BatchWriter
 	logger     zerolog.Logger
 	metrics    *metrics.Registry
 
@@ -38,20 +36,21 @@ type IngestionService struct {
 	batcher *Batcher
 
 	// Stats
-	pointsReceived atomic.Uint64
-	pointsDropped  atomic.Uint64
-	startTime      time.Time
+	pointsReceived      atomic.Uint64
+	pointsDropped       atomic.Uint64
+	droppedSinceLastLog atomic.Uint64
+	startTime           time.Time
 
 	// Lifecycle
-	wg       sync.WaitGroup
-	stopOnce sync.Once
+	shutdownFlag atomic.Bool
+	stopOnce     sync.Once
 }
 
 // NewIngestionService creates a new ingestion service
 func NewIngestionService(
 	config IngestionConfig,
-	subscriber *mqtt.Subscriber,
-	writer *timescaledb.Writer,
+	subscriber domain.MQTTSubscriber,
+	writer domain.BatchWriter,
 	logger zerolog.Logger,
 	metricsReg *metrics.Registry,
 ) *IngestionService {
@@ -79,19 +78,18 @@ func (s *IngestionService) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Create batcher
+	// Batcher reads directly from s.pointsChan — no intermediate goroutine.
 	s.batcher = NewBatcher(BatcherConfig{
 		BatchSize:     s.config.BatchSize,
 		FlushInterval: s.config.FlushInterval,
 		WriterCount:   s.config.WriterCount,
-	}, s.writer, s.logger, s.metrics)
+	}, s.pointsChan, s.writer, s.logger, s.metrics)
 
-	// Start batcher workers
 	s.batcher.Start(ctx)
 
-	// Start point processor
-	s.wg.Add(1)
-	go s.processPoints(ctx)
+	// Rate-limited drop reporter: logs accumulated drop counts every 5s
+	// instead of a per-message warn that would flood the log under backpressure.
+	go s.dropReporter(ctx)
 
 	s.logger.Info().
 		Int("buffer_size", s.config.BufferSize).
@@ -110,27 +108,21 @@ func (s *IngestionService) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
 		s.logger.Info().Msg("Stopping ingestion service...")
 
-		// Disconnect from MQTT (stops receiving new messages)
+		// Phase 1: stop accepting new points from MQTT callbacks
+		s.shutdownFlag.Store(true)
+
+		// Phase 2: disconnect MQTT — stops broker delivery
 		s.subscriber.Disconnect()
 
-		// Close the points channel to signal processor to stop
+		// Phase 3: brief grace period for any in-flight onMessage callbacks
+		// that passed the shutdownFlag check to finish their channel send.
+		// Paho's Disconnect() waits for pending handlers, but this is belt-and-suspenders.
+		time.Sleep(100 * time.Millisecond)
+
+		// Phase 4: close the shared channel — accumulator exits via !ok
 		close(s.pointsChan)
 
-		// Wait for processor to finish
-		done := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-			s.logger.Info().Msg("Point processor stopped")
-		case <-ctx.Done():
-			s.logger.Warn().Msg("Point processor stop timeout")
-		}
-
-		// Stop batcher (flushes remaining batches)
+		// Phase 5: wait for batcher to flush all remaining data
 		if err := s.batcher.Stop(ctx); err != nil {
 			stopErr = err
 		}
@@ -144,8 +136,29 @@ func (s *IngestionService) Stop(ctx context.Context) error {
 	return stopErr
 }
 
-// handleMessage is called for each incoming MQTT message
+// handleMessage is called for each incoming MQTT message.
+//
+// There is an inherent race between the shutdownFlag fast-path check and
+// close(pointsChan) in Stop().  A Paho callback that passed the flag check
+// can be suspended by the scheduler; if Stop() closes the channel before
+// the goroutine resumes, the select/send panics (default only fires on a
+// full channel, not a closed one).  The deferred recover() is the safety
+// net that turns this into a silent discard rather than a process crash.
 func (s *IngestionService) handleMessage(topic string, payload []byte, receivedAt time.Time) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Channel was closed during shutdown — discard the point.
+			s.logger.Debug().
+				Str("topic", topic).
+				Msg("Message discarded: channel closed during shutdown")
+		}
+	}()
+
+	// Fast path: reject messages after shutdown is initiated.
+	if s.shutdownFlag.Load() {
+		return
+	}
+
 	// Parse the message
 	dp, err := s.subscriber.ParseMessage(topic, payload, receivedAt)
 	if err != nil {
@@ -162,23 +175,33 @@ func (s *IngestionService) handleMessage(topic string, payload []byte, receivedA
 	// Try to send to channel (non-blocking)
 	select {
 	case s.pointsChan <- dp:
-		// Successfully queued
+		// Update buffer gauge on the successful path.
+		// len() on a buffered channel is a cheap atomic read.
+		s.metrics.SetBufferUsage(float64(len(s.pointsChan)) / float64(s.config.BufferSize))
 	default:
-		// Buffer full, drop the point
+		// Buffer full — accumulate the drop count; dropReporter logs in bulk.
 		s.pointsDropped.Add(1)
 		s.metrics.IncPointsDropped()
-		s.logger.Warn().
-			Str("topic", topic).
-			Msg("Buffer full, dropping data point")
+		s.droppedSinceLastLog.Add(1)
 	}
 }
 
-// processPoints reads from the channel and sends to batcher
-func (s *IngestionService) processPoints(ctx context.Context) {
-	defer s.wg.Done()
-
-	for dp := range s.pointsChan {
-		s.batcher.Add(dp)
+// dropReporter batches drop-count log lines so a sustained backpressure
+// episode produces one warn every 5 s instead of one per dropped message.
+func (s *IngestionService) dropReporter(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if dropped := s.droppedSinceLastLog.Swap(0); dropped > 0 {
+				s.logger.Warn().
+					Uint64("count", dropped).
+					Msg("Data points dropped due to full buffer (last 5s)")
+			}
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nexus-edge/data-ingestion/internal/adapter/timescaledb"
 	"github.com/nexus-edge/data-ingestion/internal/domain"
 	"github.com/nexus-edge/data-ingestion/internal/metrics"
 	"github.com/rs/zerolog"
@@ -22,7 +21,7 @@ type BatcherConfig struct {
 // Batcher accumulates data points into batches for efficient writing
 type Batcher struct {
 	config  BatcherConfig
-	writer  *timescaledb.Writer
+	writer  domain.BatchWriter
 	logger  zerolog.Logger
 	metrics *metrics.Registry
 
@@ -47,10 +46,13 @@ type Batcher struct {
 	stopOnce sync.Once
 }
 
-// NewBatcher creates a new batcher
+// NewBatcher creates a new batcher.
+// pointsChan is the shared channel owned by the ingestion service — the batcher
+// reads from it but never closes it.
 func NewBatcher(
 	config BatcherConfig,
-	writer *timescaledb.Writer,
+	pointsChan chan *domain.DataPoint,
+	writer domain.BatchWriter,
 	logger zerolog.Logger,
 	metricsReg *metrics.Registry,
 ) *Batcher {
@@ -59,7 +61,7 @@ func NewBatcher(
 		writer:     writer,
 		logger:     logger.With().Str("component", "batcher").Logger(),
 		metrics:    metricsReg,
-		pointsChan: make(chan *domain.DataPoint, config.BatchSize*2),
+		pointsChan: pointsChan,
 		batchChan:  make(chan *domain.Batch, config.WriterCount*2),
 	}
 }
@@ -67,7 +69,7 @@ func NewBatcher(
 // Start begins the batching and writing goroutines
 func (b *Batcher) Start(ctx context.Context) {
 	b.ctx, b.cancel = context.WithCancel(ctx)
-	b.currentBatch = domain.AcquireBatch(b.config.BatchSize)
+	b.currentBatch = domain.AcquireBatchWithCap(b.config.BatchSize)
 
 	// Start batch accumulator
 	b.wg.Add(1)
@@ -86,20 +88,20 @@ func (b *Batcher) Start(ctx context.Context) {
 		Msg("Batcher started")
 }
 
-// Stop gracefully stops the batcher, flushing remaining data
+// Stop gracefully stops the batcher, flushing remaining data.
+// The caller (ingestion service) must close the shared pointsChan before
+// calling Stop — that close is what signals the accumulator to exit.
 func (b *Batcher) Stop(ctx context.Context) error {
 	var stopErr error
 
 	b.stopOnce.Do(func() {
 		b.logger.Info().Msg("Stopping batcher...")
 
-		// Signal accumulator to stop
+		// Cancel context so flush() can take the direct-write path if
+		// batchChan is full (avoids a deadlock with slow writers).
+		// The accumulator exits via the !ok on the external pointsChan.
 		b.cancel()
 
-		// Close points channel
-		close(b.pointsChan)
-
-		// Wait for everything to finish
 		done := make(chan struct{})
 		go func() {
 			b.wg.Wait()
@@ -118,16 +120,6 @@ func (b *Batcher) Stop(ctx context.Context) error {
 	return stopErr
 }
 
-// Add adds a data point to be batched
-func (b *Batcher) Add(dp *domain.DataPoint) {
-	select {
-	case b.pointsChan <- dp:
-		// Successfully added
-	case <-b.ctx.Done():
-		// Shutting down
-	}
-}
-
 // accumulatorLoop accumulates points into batches
 func (b *Batcher) accumulatorLoop() {
 	defer b.wg.Done()
@@ -140,7 +132,11 @@ func (b *Batcher) accumulatorLoop() {
 		select {
 		case dp, ok := <-b.pointsChan:
 			if !ok {
-				// Channel closed, exit
+				// Channel closed by the ingestion service during shutdown.
+				// All sends are guaranteed done at this point — the ingestion
+				// service waits for processPoints to exit before closing.
+				// defer flushAndClose() will flush the current batch and
+				// close batchChan so writers drain cleanly.
 				return
 			}
 			b.addToBatch(dp)
@@ -148,12 +144,9 @@ func (b *Batcher) accumulatorLoop() {
 		case <-ticker.C:
 			b.flushIfNotEmpty()
 
-		case <-b.ctx.Done():
-			// Drain remaining points
-			for dp := range b.pointsChan {
-				b.addToBatch(dp)
-			}
-			return
+			// ctx.Done is intentionally absent here. The only exit path is
+			// channel close, which makes shutdown deterministic and removes the
+			// race between ctx cancellation and unread points in the channel.
 		}
 	}
 }
@@ -185,14 +178,14 @@ func (b *Batcher) flushIfNotEmpty() {
 // Must be called with batchMu held
 func (b *Batcher) flush() {
 	batch := b.currentBatch
-	b.currentBatch = domain.AcquireBatch(b.config.BatchSize)
+	b.currentBatch = domain.AcquireBatchWithCap(b.config.BatchSize)
 
 	b.batchesFlushed.Add(1)
 	b.metrics.IncBatchesFlushed()
 
 	select {
 	case b.batchChan <- batch:
-		// Successfully queued for writing
+		b.metrics.SetBatchQueueDepth(float64(len(b.batchChan)))
 	case <-b.ctx.Done():
 		// Shutting down, try to write directly
 		if err := b.writer.WriteBatch(context.Background(), batch); err != nil {
@@ -221,7 +214,11 @@ func (b *Batcher) writerLoop(id int) {
 	logger.Debug().Msg("Writer started")
 
 	for batch := range b.batchChan {
-		if err := b.writer.WriteBatch(b.ctx, batch); err != nil {
+		// Use context.Background() so that a cancelled batcher context (which
+		// happens during shutdown) does not abort writes that are still needed
+		// to flush the remaining queue. The writer's own WriteTimeout caps each
+		// individual operation.
+		if err := b.writer.WriteBatch(context.Background(), batch); err != nil {
 			logger.Error().
 				Err(err).
 				Int("batch_size", batch.Size()).
@@ -229,6 +226,7 @@ func (b *Batcher) writerLoop(id int) {
 		}
 		// Return batch to pool for reuse
 		domain.ReleaseBatch(batch)
+		b.metrics.SetBatchQueueDepth(float64(len(b.batchChan)))
 	}
 
 	logger.Debug().Msg("Writer stopped")

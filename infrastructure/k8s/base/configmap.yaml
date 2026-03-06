@@ -103,16 +103,12 @@ data:
       host: "${TIMESCALEDB_HOST}"
       port: 5432
       database: "${TIMESCALEDB_DATABASE}"
-      maxConnections: 20
-      minConnections: 5
-    
-    batching:
-      size: 5000
-      timeout: 1s
-      workers: 4
-    
-    buffer:
-      size: 50000
-      highWaterMark: 40000
-      lowWaterMark: 10000
+      pool_size: 20
+
+    ingestion:
+      buffer_size: 200000
+      batch_size: 10000
+      flush_interval: 250ms
+      writer_count: 8
+      use_copy_protocol: true
 

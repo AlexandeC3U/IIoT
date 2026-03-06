@@ -2,6 +2,10 @@
 package metrics
 
 import (
+	"context"
+	"runtime"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -36,20 +40,20 @@ type Registry struct {
 	DeviceErrors      *prometheus.CounterVec
 
 	// S7-specific metrics
-	S7DeviceConnected  *prometheus.GaugeVec
-	S7TagErrorsTotal   *prometheus.CounterVec
-	S7ReadDuration     *prometheus.HistogramVec
-	S7WriteDuration    *prometheus.HistogramVec
-	S7BreakerState     *prometheus.GaugeVec
+	S7DeviceConnected *prometheus.GaugeVec
+	S7TagErrorsTotal  *prometheus.CounterVec
+	S7ReadDuration    *prometheus.HistogramVec
+	S7WriteDuration   *prometheus.HistogramVec
+	S7BreakerState    *prometheus.GaugeVec
 
 	// Clock drift metrics
-	ClockDriftSeconds prometheus.Gauge        // Current NTP offset in seconds
-	ClockDriftChecks  *prometheus.CounterVec   // NTP check results by status (success/error)
-	OPCUAClockDrift   *prometheus.GaugeVec     // Clock drift between OPC UA server and gateway
+	ClockDriftSeconds prometheus.Gauge       // Current NTP offset in seconds
+	ClockDriftChecks  *prometheus.CounterVec // NTP check results by status (success/error)
+	OPCUAClockDrift   *prometheus.GaugeVec   // Clock drift between OPC UA server and gateway
 
 	// Certificate metrics
-	OPCUACertsTotal   *prometheus.GaugeVec     // Certificate count by store (trusted/rejected)
-	OPCUACertExpiry   *prometheus.GaugeVec     // Days until cert expiry, by fingerprint
+	OPCUACertsTotal *prometheus.GaugeVec // Certificate count by store (trusted/rejected)
+	OPCUACertExpiry *prometheus.GaugeVec // Days until cert expiry, by fingerprint
 
 	// System metrics
 	GoroutineCount prometheus.Gauge
@@ -384,4 +388,39 @@ func (r *Registry) UpdateOPCUACertCounts(trustedCount, rejectedCount int) {
 // RecordOPCUACertExpiry records the days until a certificate expires.
 func (r *Registry) RecordOPCUACertExpiry(fingerprint, subject string, daysUntilExpiry int) {
 	r.OPCUACertExpiry.WithLabelValues(fingerprint, subject).Set(float64(daysUntilExpiry))
+}
+
+// UpdateSystemMetrics updates the system resource metrics (goroutines, memory).
+func (r *Registry) UpdateSystemMetrics() {
+	r.GoroutineCount.Set(float64(runtime.NumGoroutine()))
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	r.MemoryUsage.Set(float64(memStats.Alloc))
+}
+
+// StartSystemMetricsCollector starts a background goroutine that periodically
+// collects system metrics. Returns immediately. The collector stops when the
+// context is cancelled.
+func (r *Registry) StartSystemMetricsCollector(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Collect immediately on start
+		r.UpdateSystemMetrics()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.UpdateSystemMetrics()
+			}
+		}
+	}()
 }

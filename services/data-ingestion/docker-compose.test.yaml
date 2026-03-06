@@ -1,0 +1,46 @@
+# E2E / Load Test Infrastructure
+# ================================
+#
+# Starts only the external dependencies needed for e2e tests.
+# The ingestion service itself runs inside the Go test process.
+#
+# Usage:
+#   docker-compose -f docker-compose.test.yaml up -d
+#   go test -tags=e2e -v ./testing/e2e/...
+#   docker-compose -f docker-compose.test.yaml down -v
+
+services:
+  emqx:
+    image: emqx/emqx:5.3.0
+    container_name: nexus-emqx-test
+    ports:
+      - "11883:1883"
+    environment:
+      - EMQX_NAME=nexus-emqx-test
+      - EMQX_HOST=0.0.0.0
+      - EMQX_ALLOW_ANONYMOUS=true
+      - EMQX_AUTHORIZATION__NO_MATCH=allow
+      - EMQX_AUTHORIZATION__CACHE__ENABLE=false
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg15
+    container_name: nexus-timescaledb-test
+    ports:
+      - "15432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=nexus_historian
+    volumes:
+      - ./init-user.sql:/docker-entrypoint-initdb.d/00-init-user.sql:ro
+      - ../../config/timescaledb/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexus_historian"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

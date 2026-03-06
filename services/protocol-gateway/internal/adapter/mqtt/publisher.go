@@ -346,23 +346,15 @@ func (p *Publisher) publishRaw(ctx context.Context, topic string, payload []byte
 
 	token := client.Publish(topic, qos, retained, payload)
 
-	// Wait for publish with context
+	// Wait for publish with context — use Token.Done() channel directly
+	// instead of spawning a goroutine per publish (eliminates GC pressure at scale)
 	publishStart := time.Now()
-	publishDone := make(chan bool, 1)
-	go func() {
-		publishDone <- token.WaitTimeout(p.config.PublishTimeout)
-	}()
+	timeout := time.NewTimer(p.config.PublishTimeout)
+	defer timeout.Stop()
 
 	select {
-	case success := <-publishDone:
+	case <-token.Done():
 		latency := time.Since(publishStart)
-		if !success {
-			p.stats.MessagesFailed.Add(1)
-			if p.metrics != nil {
-				p.metrics.RecordMQTTPublish(false, latency.Seconds())
-			}
-			return fmt.Errorf("%w: publish timeout", domain.ErrMQTTPublishFailed)
-		}
 		if token.Error() != nil {
 			p.stats.MessagesFailed.Add(1)
 			if p.metrics != nil {
@@ -370,6 +362,13 @@ func (p *Publisher) publishRaw(ctx context.Context, topic string, payload []byte
 			}
 			return fmt.Errorf("%w: %v", domain.ErrMQTTPublishFailed, token.Error())
 		}
+	case <-timeout.C:
+		latency := time.Since(publishStart)
+		p.stats.MessagesFailed.Add(1)
+		if p.metrics != nil {
+			p.metrics.RecordMQTTPublish(false, latency.Seconds())
+		}
+		return fmt.Errorf("%w: publish timeout", domain.ErrMQTTPublishFailed)
 	case <-ctx.Done():
 		latency := time.Since(publishStart)
 		p.stats.MessagesFailed.Add(1)
@@ -414,17 +413,27 @@ func (p *Publisher) bufferMessage(dataPoint *domain.DataPoint) error {
 		}
 		return nil
 	default:
-		// Buffer full, drop oldest message
+		// Buffer full — drop oldest to make room.
+		// Drain and re-send are both non-blocking to avoid a race where
+		// processBuffer() or another goroutine alters the channel between
+		// the drain and the send, which could cause this goroutine to block.
 		select {
 		case <-p.messageBuffer:
-			p.messageBuffer <- msg
+			// Drained one old message
+		default:
+			// processBuffer already drained it — space exists now
+		}
+		select {
+		case p.messageBuffer <- msg:
 			p.logger.Warn().Msg("Buffer full, dropped oldest message")
+			p.stats.MessagesBuffered.Add(1)
 			if p.metrics != nil {
 				p.metrics.UpdateMQTTBufferSize(len(p.messageBuffer))
 			}
 			return nil
 		default:
-			return fmt.Errorf("message buffer full")
+			// Another goroutine filled the slot — give up
+			return fmt.Errorf("message buffer full, contention too high")
 		}
 	}
 }
@@ -593,14 +602,9 @@ func (p *Publisher) IsConnected() bool {
 }
 
 // Stats returns publisher statistics.
-func (p *Publisher) Stats() PublisherStats {
-	return PublisherStats{
-		MessagesPublished: p.stats.MessagesPublished,
-		MessagesFailed:    p.stats.MessagesFailed,
-		MessagesBuffered:  p.stats.MessagesBuffered,
-		BytesSent:         p.stats.BytesSent,
-		ReconnectCount:    p.stats.ReconnectCount,
-	}
+// Returns a pointer to the internal stats — callers must use .Load() on fields.
+func (p *Publisher) Stats() *PublisherStats {
+	return p.stats
 }
 
 // BufferSize returns the current number of buffered messages.

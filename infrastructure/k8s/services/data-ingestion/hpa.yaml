@@ -1,4 +1,34 @@
 # Data Ingestion Service - Horizontal Pod Autoscaler
+#
+# Uses custom Prometheus metrics via prometheus-adapter for ingestion-aware
+# scaling. Falls back to CPU as a secondary signal.
+#
+# Prerequisites:
+#   - prometheus-adapter installed and configured with the custom metrics below
+#   - ServiceMonitor scraping data-ingestion /metrics endpoint (already exists)
+#
+# prometheus-adapter ConfigMap rules (add to prometheus-adapter values):
+#
+#   rules:
+#     custom:
+#       - seriesQuery: 'data_ingestion_buffer_usage{namespace="nexus"}'
+#         resources:
+#           overrides:
+#             namespace: {resource: "namespace"}
+#             pod: {resource: "pod"}
+#         name:
+#           as: "data_ingestion_buffer_usage"
+#         metricsQuery: 'avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+#
+#       - seriesQuery: 'data_ingestion_points_dropped_total{namespace="nexus"}'
+#         resources:
+#           overrides:
+#             namespace: {resource: "namespace"}
+#             pod: {resource: "pod"}
+#         name:
+#           as: "data_ingestion_points_dropped_rate"
+#         metricsQuery: 'rate(<<.Series>>{<<.LabelMatchers>>}[2m])'
+#
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -13,35 +43,51 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: data-ingestion
-  
+
   minReplicas: 2
   maxReplicas: 8
-  
+
   metrics:
+    # Primary: scale on buffer pressure (leads CPU by seconds)
+    # Target 0.6 means scale up when buffer is 60% full on average
+    - type: Pods
+      pods:
+        metric:
+          name: data_ingestion_buffer_usage
+        target:
+          type: AverageValue
+          averageValue: "0.6"
+
+    # Secondary: scale on active data loss
+    # Any sustained drop rate > 0 triggers scale-up
+    - type: Pods
+      pods:
+        metric:
+          name: data_ingestion_points_dropped_rate
+        target:
+          type: AverageValue
+          averageValue: "1"
+
+    # Fallback: CPU as a safety net in case custom metrics are unavailable
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-  
+          averageUtilization: 75
+
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 60
+      stabilizationWindowSeconds: 30
       policies:
+        # Respond quickly to buffer pressure
         - type: Pods
           value: 2
-          periodSeconds: 60
+          periodSeconds: 30
     scaleDown:
       stabilizationWindowSeconds: 300
       policies:
+        # Scale down conservatively to avoid flapping
         - type: Pods
           value: 1
           periodSeconds: 120
-

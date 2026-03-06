@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.22.5-alpine3.20 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -7,8 +7,8 @@ RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /build
 
 # Copy go mod files first for better caching
-COPY go.mod go.sum* ./
-RUN go mod tidy && go mod download
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 
 # Copy source code
 COPY . .
@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     ./cmd/ingestion
 
 # Runtime stage
-FROM alpine:3.19
+FROM alpine:3.20
 
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates tzdata
@@ -43,8 +43,8 @@ RUN chown -R nexus:nexus /app
 # Switch to non-root user
 USER nexus
 
-# Expose HTTP port
-EXPOSE 8080
+# Expose HTTP ports (8080 = health probes, 8081 = metrics/status/pprof)
+EXPOSE 8080 8081
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

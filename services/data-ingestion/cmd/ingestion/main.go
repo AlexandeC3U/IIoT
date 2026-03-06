@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "net/http/pprof" // registers pprof handlers on http.DefaultServeMux
+
 	"github.com/nexus-edge/data-ingestion/internal/adapter/config"
 	"github.com/nexus-edge/data-ingestion/internal/adapter/mqtt"
 	"github.com/nexus-edge/data-ingestion/internal/adapter/timescaledb"
@@ -59,7 +61,11 @@ func main() {
 		Password:        cfg.Database.Password,
 		PoolSize:        cfg.Database.PoolSize,
 		MaxIdleTime:     cfg.Database.MaxIdleTime,
+		ConnectTimeout:  cfg.Database.ConnectTimeout,
 		UseCopyProtocol: cfg.Ingestion.UseCopyProtocol,
+		MaxRetries:      cfg.Ingestion.MaxRetries,
+		RetryDelay:      cfg.Ingestion.RetryDelay,
+		WriteTimeout:    cfg.Ingestion.WriteTimeout,
 	}, logger, metricsRegistry)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize TimescaleDB writer")
@@ -73,10 +79,11 @@ func main() {
 		Username:       cfg.MQTT.Username,
 		Password:       cfg.MQTT.Password,
 		Topics:         cfg.MQTT.Topics,
-		QoS:            cfg.MQTT.QoS,
+		QoS:            *cfg.MQTT.QoS,
 		KeepAlive:      cfg.MQTT.KeepAlive,
 		CleanSession:   cfg.MQTT.CleanSession,
 		ReconnectDelay: cfg.MQTT.ReconnectDelay,
+		ConnectTimeout: cfg.MQTT.ConnectTimeout,
 	}, logger, metricsRegistry)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to initialize MQTT subscriber")
@@ -93,27 +100,46 @@ func main() {
 	// Initialize health checker
 	healthChecker := health.NewChecker(subscriber, dbWriter, logger)
 
-	// Start HTTP server for health and metrics
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthChecker.HealthHandler)
-	mux.HandleFunc("/health/live", healthChecker.LiveHandler)
-	mux.HandleFunc("/health/ready", healthChecker.ReadyHandler)
-	mux.HandleFunc("/status", ingestionService.StatusHandler)
-	mux.Handle("/metrics", promhttp.Handler())
+	// Public server (port 8080): health probes only — exposed to K8s kubelet
+	publicMux := http.NewServeMux()
+	publicMux.HandleFunc("/health", healthChecker.HealthHandler)
+	publicMux.HandleFunc("/health/live", healthChecker.LiveHandler)
+	publicMux.HandleFunc("/health/ready", healthChecker.ReadyHandler)
 
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.HTTP.Port),
-		Handler:      mux,
-		ReadTimeout:  cfg.HTTP.ReadTimeout,
-		WriteTimeout: cfg.HTTP.WriteTimeout,
-		IdleTimeout:  cfg.HTTP.IdleTimeout,
+		Addr:           fmt.Sprintf(":%d", cfg.HTTP.Port),
+		Handler:        publicMux,
+		ReadTimeout:    cfg.HTTP.ReadTimeout,
+		WriteTimeout:   cfg.HTTP.WriteTimeout,
+		IdleTimeout:    cfg.HTTP.IdleTimeout,
+		MaxHeaderBytes: 1 << 20, // 1 MB
 	}
 
-	// Start HTTP server in goroutine
 	go func() {
-		logger.Info().Int("port", cfg.HTTP.Port).Msg("HTTP server starting")
+		logger.Info().Int("port", cfg.HTTP.Port).Msg("Public HTTP server starting")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error().Err(err).Msg("HTTP server error")
+			logger.Error().Err(err).Msg("Public HTTP server error")
+		}
+	}()
+
+	// Internal server (port 8081): metrics, status, optional pprof — cluster-internal only
+	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("/status", ingestionService.StatusHandler)
+	internalMux.Handle("/metrics", promhttp.Handler())
+	if cfg.HTTP.EnablePprof {
+		// Mount pprof routes registered on DefaultServeMux by the blank import
+		internalMux.Handle("/debug/pprof/", http.DefaultServeMux)
+	}
+
+	internalServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.HTTP.InternalPort),
+		Handler: internalMux,
+	}
+
+	go func() {
+		logger.Info().Int("port", cfg.HTTP.InternalPort).Msg("Internal HTTP server starting")
+		if err := internalServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error().Err(err).Msg("Internal HTTP server error")
 		}
 	}()
 
@@ -142,9 +168,12 @@ func main() {
 		logger.Error().Err(err).Msg("Error stopping ingestion service")
 	}
 
-	// Stop HTTP server
+	// Stop HTTP servers
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error().Err(err).Msg("Error stopping HTTP server")
+		logger.Error().Err(err).Msg("Error stopping public HTTP server")
+	}
+	if err := internalServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error().Err(err).Msg("Error stopping internal HTTP server")
 	}
 
 	logger.Info().Msg("Data Ingestion Service stopped")

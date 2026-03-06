@@ -24,8 +24,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +56,7 @@ type ConnectionPool struct {
 	logger   zerolog.Logger
 	metrics  *metrics.Registry
 	closed   bool
+	done     chan struct{} // Closed on shutdown to unblock background loops immediately
 	wg       sync.WaitGroup
 
 	// Fleet-Wide Load Shaping
@@ -219,6 +220,7 @@ func NewConnectionPool(config PoolConfig, logger zerolog.Logger, metricsReg *met
 		devices:           make(map[string]*DeviceBinding),
 		logger:            logger.With().Str("component", "opcua-pool").Logger(),
 		metrics:           metricsReg,
+		done:              make(chan struct{}),
 		maxGlobalInFlight: int64(config.MaxGlobalInFlight),
 		brownoutThreshold: config.BrownoutThreshold,
 		browseCacheTTL:    60 * time.Second, // Browse cache expires after 60s
@@ -586,7 +588,6 @@ func (p *ConnectionPool) executeWithTwoTierBreaker(
 		// Second tier: Device breaker - checks if this device's config is valid
 		return binding.breaker.Execute(fn)
 	})
-
 	if err != nil {
 		// Classify the error to determine which breaker should count it
 		// The gobreaker already counted it, but we log for observability
@@ -762,7 +763,6 @@ func (p *ConnectionPool) ReadTags(ctx context.Context, device *domain.Device, ta
 			}
 			return allResults, nil
 		})
-
 		if err != nil {
 			return err
 		}
@@ -883,7 +883,6 @@ func (p *ConnectionPool) WriteTags(ctx context.Context, device *domain.Device, w
 		result = res.([]error)
 		return nil
 	})
-
 	if err != nil {
 		errors := make([]error, len(writes))
 		for i := range errors {
@@ -938,7 +937,6 @@ func (p *ConnectionPool) BrowseNodes(ctx context.Context, deviceID string, nodeI
 		result, browseErr = session.client.Browse(ctx, nodeID, maxDepth)
 		return result, browseErr
 	})
-
 	if err != nil {
 		if err == gobreaker.ErrOpenState {
 			return nil, fmt.Errorf("%w: endpoint breaker open", domain.ErrCircuitBreakerOpen)
@@ -1033,15 +1031,22 @@ func (p *ConnectionPool) RemoveClient(deviceID string) error {
 }
 
 // Close closes all sessions and stops the pool.
+// Shutdown order: signal done → wait for workers to exit → close queues → close sessions.
 func (p *ConnectionPool) Close() error {
 	p.mu.Lock()
 	p.closed = true
+	close(p.done) // Signal all workers, healthCheckLoop, idleReaperLoop to exit
+	p.mu.Unlock()
+
+	// Wait for priority queue processors, health checker, and reaper to exit.
+	// They will see p.done and return cleanly.
+	p.wg.Wait()
+
+	// Now that all workers have exited, close the priority queue channels.
+	// No goroutines are reading from them at this point.
 	for i := range p.priorityQueues {
 		close(p.priorityQueues[i])
 	}
-	p.mu.Unlock()
-
-	p.wg.Wait()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1049,6 +1054,14 @@ func (p *ConnectionPool) Close() error {
 	var lastErr error
 	for epKey, session := range p.sessions {
 		session.mu.Lock()
+		// Stop subscription manager BEFORE disconnecting client
+		// This ensures notification handlers exit cleanly
+		if session.subscriptionMgr != nil {
+			if err := session.subscriptionMgr.Stop(); err != nil {
+				p.logger.Warn().Err(err).Str("endpoint", epKey[:min(len(epKey), 50)]).Msg("Error stopping subscription manager")
+			}
+			session.subscriptionMgr = nil
+		}
 		if err := session.client.Disconnect(); err != nil {
 			lastErr = err
 			p.logger.Warn().Err(err).Str("endpoint", epKey[:min(len(epKey), 50)]).Msg("Error closing session")

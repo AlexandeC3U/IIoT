@@ -24,10 +24,12 @@ type SubscriberConfig struct {
 	KeepAlive      time.Duration
 	CleanSession   bool
 	ReconnectDelay time.Duration
+	ConnectTimeout time.Duration
 }
 
-// MessageHandler is called for each received MQTT message
-type MessageHandler func(topic string, payload []byte, receivedAt time.Time)
+// MessageHandler is called for each received MQTT message.
+// This is a type alias for domain.MessageHandler so callers share a single type.
+type MessageHandler = domain.MessageHandler
 
 // Subscriber handles MQTT subscription and message delivery
 type Subscriber struct {
@@ -39,9 +41,9 @@ type Subscriber struct {
 	handler     MessageHandler
 	handlerMu   sync.RWMutex
 	isConnected atomic.Bool
+	everConnected atomic.Bool // distinguishes first connect from reconnects
 
-	messagesReceived atomic.Uint64
-	parseErrors      atomic.Uint64
+	parseErrors atomic.Uint64
 }
 
 // NewSubscriber creates a new MQTT subscriber
@@ -84,8 +86,8 @@ func (s *Subscriber) Connect(ctx context.Context) error {
 		Msg("Connecting to MQTT broker")
 
 	token := s.client.Connect()
-	if !token.WaitTimeout(30 * time.Second) {
-		return fmt.Errorf("connection timeout")
+	if !token.WaitTimeout(s.config.ConnectTimeout) {
+		return fmt.Errorf("connection timeout after %s", s.config.ConnectTimeout)
 	}
 	if token.Error() != nil {
 		return fmt.Errorf("connection failed: %w", token.Error())
@@ -109,8 +111,8 @@ func (s *Subscriber) Subscribe() error {
 	}
 
 	token := s.client.SubscribeMultiple(filters, nil)
-	if !token.WaitTimeout(10 * time.Second) {
-		return fmt.Errorf("subscribe timeout")
+	if !token.WaitTimeout(s.config.ConnectTimeout) {
+		return fmt.Errorf("subscribe timeout after %s", s.config.ConnectTimeout)
 	}
 	if token.Error() != nil {
 		return fmt.Errorf("subscribe failed: %w", token.Error())
@@ -138,19 +140,24 @@ func (s *Subscriber) IsConnected() bool {
 // Stats returns subscriber statistics
 func (s *Subscriber) Stats() map[string]interface{} {
 	return map[string]interface{}{
-		"connected":          s.IsConnected(),
-		"broker":             s.config.BrokerURL,
-		"client_id":          s.config.ClientID,
-		"topics":             s.config.Topics,
-		"messages_received":  s.messagesReceived.Load(),
-		"parse_errors":       s.parseErrors.Load(),
+		"connected":    s.IsConnected(),
+		"broker":       s.config.BrokerURL,
+		"client_id":    s.config.ClientID,
+		"topics":       s.config.Topics,
+		"parse_errors": s.parseErrors.Load(),
 	}
 }
 
 // onConnect is called when connection is established
 func (s *Subscriber) onConnect(client paho.Client) {
 	s.isConnected.Store(true)
-	s.logger.Info().Msg("Connected to MQTT broker")
+	if s.everConnected.Swap(true) {
+		// Not the first connection — this is a reconnect
+		s.metrics.IncMQTTReconnects()
+		s.logger.Info().Msg("Reconnected to MQTT broker")
+	} else {
+		s.logger.Info().Msg("Connected to MQTT broker")
+	}
 
 	// Resubscribe on reconnection
 	if err := s.Subscribe(); err != nil {
@@ -167,7 +174,6 @@ func (s *Subscriber) onConnectionLost(client paho.Client, err error) {
 // onMessage handles incoming MQTT messages
 func (s *Subscriber) onMessage(client paho.Client, msg paho.Message) {
 	receivedAt := time.Now()
-	s.messagesReceived.Add(1)
 
 	s.handlerMu.RLock()
 	handler := s.handler

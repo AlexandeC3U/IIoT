@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: data-ingestion
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/component: ingestion
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: data-ingestion
+  endpoints:
+    - port: health   # port 8081 — internal server serving /metrics
+      path: /metrics
+      interval: 15s
+  namespaceSelector:
+    matchNames:
+      - nexus

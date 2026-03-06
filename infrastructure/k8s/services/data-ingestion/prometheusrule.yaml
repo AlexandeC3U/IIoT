@@ -1,0 +1,99 @@
+# Data Ingestion Service - Alerting Rules
+# Requires Prometheus Operator (PrometheusRule CRD)
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: data-ingestion-alerts
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: data-ingestion
+    app.kubernetes.io/component: ingestion
+    app.kubernetes.io/part-of: nexus-edge
+    # Match your Prometheus operator's ruleSelector
+    prometheus: nexus
+    role: alert-rules
+spec:
+  groups:
+    - name: data-ingestion.rules
+      rules:
+        # Circuit breaker open — database is unreachable
+        - alert: IngestionCircuitBreakerOpen
+          expr: data_ingestion_circuit_breaker_state > 0
+          for: 1m
+          labels:
+            severity: critical
+            service: data-ingestion
+          annotations:
+            summary: "Data ingestion circuit breaker is open"
+            description: >-
+              Circuit breaker on {{ $labels.pod }} has been in state
+              {{ $value }} (1=half-open, 2=open) for over 1 minute.
+              TimescaleDB may be unreachable.
+
+        # Active data loss — points being dropped
+        - alert: IngestionDataLoss
+          expr: rate(data_ingestion_points_dropped_total[5m]) > 0
+          for: 2m
+          labels:
+            severity: critical
+            service: data-ingestion
+          annotations:
+            summary: "Data ingestion is dropping points"
+            description: >-
+              {{ $labels.pod }} is dropping data points at
+              {{ $value | humanize }}/s due to buffer backpressure.
+              Consider scaling up replicas.
+
+        # Sustained write errors
+        - alert: IngestionWriteErrors
+          expr: rate(data_ingestion_write_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            service: data-ingestion
+          annotations:
+            summary: "Data ingestion write errors"
+            description: >-
+              {{ $labels.pod }} has sustained write errors at
+              {{ $value | humanize }}/s for 5 minutes.
+
+        # Buffer approaching capacity
+        - alert: IngestionBufferHigh
+          expr: data_ingestion_buffer_usage > 0.8
+          for: 2m
+          labels:
+            severity: warning
+            service: data-ingestion
+          annotations:
+            summary: "Data ingestion buffer above 80%"
+            description: >-
+              {{ $labels.pod }} buffer usage is {{ $value | humanizePercentage }}.
+              Approaching capacity — data loss imminent if load continues.
+
+        # Ingestion lag — falling behind
+        - alert: IngestionLagHigh
+          expr: data_ingestion_lag_seconds > 30
+          for: 5m
+          labels:
+            severity: warning
+            service: data-ingestion
+          annotations:
+            summary: "Data ingestion lag exceeds 30s"
+            description: >-
+              {{ $labels.pod }} ingestion lag is {{ $value | humanizeDuration }}.
+              The service is falling behind incoming message rate.
+
+        # MQTT disconnected
+        - alert: IngestionMQTTDisconnected
+          expr: |
+            changes(data_ingestion_mqtt_reconnects_total[10m]) > 3
+          for: 1m
+          labels:
+            severity: warning
+            service: data-ingestion
+          annotations:
+            summary: "Frequent MQTT reconnections"
+            description: >-
+              {{ $labels.pod }} has reconnected to MQTT
+              {{ $value }} times in the last 10 minutes.
+              Check broker health and network stability.

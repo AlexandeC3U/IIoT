@@ -10,6 +10,8 @@ resources:
   - service.yaml
   - hpa.yaml
   - pdb.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml
 
 commonLabels:
   app.kubernetes.io/name: data-ingestion
