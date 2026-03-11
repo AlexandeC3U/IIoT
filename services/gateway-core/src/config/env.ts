@@ -23,12 +23,31 @@ const envSchema = z.object({
   MQTT_USERNAME: z.string().optional(),
   MQTT_PASSWORD: z.string().optional(),
 
+  // Protocol-gateway proxy
+  PROTOCOL_GATEWAY_URL: z.string().default('http://localhost:8080'),
+
+  // Data-ingestion (for aggregated health checks)
+  DATA_INGESTION_URL: z.string().default('http://localhost:8081'),
+
   // CORS
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
-  // JWT (future auth)
-  JWT_SECRET: z.string().default('dev-secret-change-in-production'),
-  JWT_EXPIRES_IN: z.string().default('24h'),
+  // Auth (Authentik OIDC)
+  AUTH_ENABLED: z.coerce.boolean().default(false),
+  OIDC_ISSUER_URL: z.string().optional(),
+  OIDC_JWKS_URL: z.string().optional(), // Override JWKS endpoint (auto-discovered if not set)
+  OIDC_AUDIENCE: z.string().optional(),
+
+  // Audit logging (independent of auth — can audit anonymous actions too)
+  AUDIT_ENABLED: z.coerce.boolean().default(false),
+
+  // WebSocket bridge
+  WS_MAX_SUBSCRIPTIONS_PER_CLIENT: z.coerce.number().default(100),
+
+  // Rate limiting
+  RATE_LIMIT_ENABLED: z.coerce.boolean().default(false),
+  RATE_LIMIT_MAX: z.coerce.number().default(100),
+  RATE_LIMIT_WINDOW: z.string().default('1 minute'),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -37,7 +56,7 @@ function validateEnv(): Env {
   const parsed = envSchema.safeParse(process.env);
 
   if (!parsed.success) {
-    console.error('❌ Invalid environment variables:');
+    console.error('Invalid environment variables:');
     console.error(JSON.stringify(parsed.error.format(), null, 2));
     process.exit(1);
   }

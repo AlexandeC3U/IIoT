@@ -1,9 +1,21 @@
-import { and, count, eq, ilike, or, sql } from 'drizzle-orm';
+import { and, count, eq, ilike, or } from 'drizzle-orm';
 import { db } from '../../db/index.js';
 import { devices, tags, type NewTag, type Tag } from '../../db/schema.js';
 import { ConflictError, NotFoundError, ValidationError } from '../../lib/errors.js';
+import { logger } from '../../lib/logger.js';
 import { mqttService } from '../../mqtt/client.js';
+import { deviceService } from '../devices/service.js';
 import type { BulkCreateTagsInput, CreateTagInput, TagQuery, UpdateTagInput } from './schema.js';
+
+/** PostgreSQL unique_violation error code */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === '23505';
+}
+
+/** Escape LIKE/ILIKE wildcards to prevent injection */
+function escapeLike(value: string): string {
+  return value.replace(/[%_\\]/g, '\\$&');
+}
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -34,9 +46,9 @@ export class TagService {
     if (query.search) {
       conditions.push(
         or(
-          ilike(tags.name, `%${query.search}%`),
-          ilike(tags.description, `%${query.search}%`),
-          ilike(tags.address, `%${query.search}%`)
+          ilike(tags.name, `%${escapeLike(query.search)}%`),
+          ilike(tags.description, `%${escapeLike(query.search)}%`),
+          ilike(tags.address, `%${escapeLike(query.search)}%`)
         )
       );
     }
@@ -86,7 +98,7 @@ export class TagService {
    * Create a new tag
    */
   async create(input: CreateTagInput): Promise<Tag> {
-    // Verify device exists
+    // Verify device exists (FK will also catch this, but gives a better error message)
     const device = await db
       .select({ id: devices.id })
       .from(devices)
@@ -95,19 +107,6 @@ export class TagService {
 
     if (device.length === 0) {
       throw new ValidationError(`Device with id '${input.deviceId}' not found`);
-    }
-
-    // Check for duplicate tag name within device
-    const existing = await db
-      .select({ id: tags.id })
-      .from(tags)
-      .where(and(eq(tags.deviceId, input.deviceId), eq(tags.name, input.name)))
-      .limit(1);
-
-    if (existing.length > 0) {
-      throw new ConflictError(
-        `Tag with name '${input.name}' already exists for device '${input.deviceId}'`
-      );
     }
 
     const newTag: NewTag = {
@@ -122,23 +121,55 @@ export class TagService {
       clampMin: input.clampMin,
       clampMax: input.clampMax,
       engineeringUnits: input.engineeringUnits,
-      deadbandAbsolute: input.deadbandAbsolute,
-      deadbandPercent: input.deadbandPercent,
-      customTopic: input.customTopic,
+      deadbandType: input.deadbandType,
+      deadbandValue: input.deadbandValue,
+      accessMode: input.accessMode,
+      priority: input.priority,
+      byteOrder: input.byteOrder,
+      registerType: input.registerType,
+      registerCount: input.registerCount,
+      opcNodeId: input.opcNodeId,
+      opcNamespaceUri: input.opcNamespaceUri,
+      s7Address: input.s7Address,
+      topicSuffix: input.topicSuffix,
       metadata: input.metadata ?? {},
     };
 
-    const result = await db.insert(tags).values(newTag).returning();
-    const tag = result[0];
+    let tag: Tag;
+    try {
+      const result = await db.insert(tags).values(newTag).returning();
+      tag = result[0];
+    } catch (error: unknown) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictError(
+          `Tag with name '${input.name}' already exists for device '${input.deviceId}'`
+        );
+      }
+      throw error;
+    }
 
-    // Notify protocol gateways about new tag
-    await mqttService.notifyTagChange('create', tag);
+    // Increment parent device config version
+    await deviceService.incrementConfigVersion(input.deviceId);
+
+    // Update setup status to 'configured' if this is the first tag
+    const tagCount = await db
+      .select({ count: count() })
+      .from(tags)
+      .where(eq(tags.deviceId, input.deviceId));
+    if (tagCount[0]?.count === 1) {
+      await deviceService.updateSetupStatus(input.deviceId, 'configured');
+    }
+
+    // Notify protocol gateways (best-effort — don't fail HTTP on MQTT error)
+    mqttService.notifyTagChange('create', tag).catch((err) => {
+      logger.error({ err, tagId: tag.id }, 'Failed to send MQTT tag create notification');
+    });
 
     return tag;
   }
 
   /**
-   * Bulk create tags for a device
+   * Bulk create tags for a device (Phase 2 of two-phase setup)
    */
   async bulkCreate(input: BulkCreateTagsInput): Promise<{ created: number; tags: Tag[] }> {
     // Verify device exists
@@ -152,19 +183,14 @@ export class TagService {
       throw new ValidationError(`Device with id '${input.deviceId}' not found`);
     }
 
-    // Check for duplicates
-    const tagNames = input.tags.map((t) => t.name);
-    const existing = await db
-      .select({ name: tags.name })
+    // Check if device had tags before (for setup status tracking)
+    const existingTagCount = await db
+      .select({ count: count() })
       .from(tags)
-      .where(and(eq(tags.deviceId, input.deviceId), sql`${tags.name} = ANY(${tagNames})`));
+      .where(eq(tags.deviceId, input.deviceId));
+    const hadTagsBefore = (existingTagCount[0]?.count ?? 0) > 0;
 
-    if (existing.length > 0) {
-      const existingNames = existing.map((e) => e.name).join(', ');
-      throw new ConflictError(`Tags already exist: ${existingNames}`);
-    }
-
-    // Insert all tags
+    // Insert all tags — rely on DB unique constraint to catch duplicates
     const newTags: NewTag[] = input.tags.map((t) => ({
       deviceId: input.deviceId,
       name: t.name,
@@ -174,15 +200,46 @@ export class TagService {
       dataType: t.dataType,
       scaleFactor: t.scaleFactor,
       scaleOffset: t.scaleOffset,
+      clampMin: t.clampMin,
+      clampMax: t.clampMax,
       engineeringUnits: t.engineeringUnits,
+      deadbandType: t.deadbandType,
+      deadbandValue: t.deadbandValue,
+      accessMode: t.accessMode,
+      priority: t.priority,
+      byteOrder: t.byteOrder,
+      registerType: t.registerType,
+      registerCount: t.registerCount,
+      opcNodeId: t.opcNodeId,
+      opcNamespaceUri: t.opcNamespaceUri,
+      s7Address: t.s7Address,
+      topicSuffix: t.topicSuffix,
       metadata: t.metadata ?? {},
     }));
 
-    const result = await db.insert(tags).values(newTags).returning();
+    let result: Tag[];
+    try {
+      result = await db.insert(tags).values(newTags).returning();
+    } catch (error: unknown) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictError('One or more tag names already exist for this device');
+      }
+      throw error;
+    }
 
-    // Notify about each created tag
+    // Increment parent device config version
+    await deviceService.incrementConfigVersion(input.deviceId);
+
+    // Update setup status if this is the first batch of tags
+    if (!hadTagsBefore) {
+      await deviceService.updateSetupStatus(input.deviceId, 'configured');
+    }
+
+    // Notify about each created tag (best-effort)
     for (const tag of result) {
-      await mqttService.notifyTagChange('create', tag);
+      mqttService.notifyTagChange('create', tag).catch((err) => {
+        logger.error({ err, tagId: tag.id }, 'Failed to send MQTT tag create notification');
+      });
     }
 
     return { created: result.length, tags: result };
@@ -194,34 +251,32 @@ export class TagService {
   async update(id: string, input: UpdateTagInput): Promise<Tag> {
     const existingTag = await this.getById(id);
 
-    // Check for duplicate name if name is being changed
-    if (input.name && input.name !== existingTag.name) {
-      const duplicate = await db
-        .select({ id: tags.id })
-        .from(tags)
-        .where(
-          and(eq(tags.deviceId, existingTag.deviceId), eq(tags.name, input.name), sql`${tags.id} != ${id}`)
-        )
-        .limit(1);
+    let tag: Tag;
+    try {
+      const result = await db
+        .update(tags)
+        .set({
+          ...input,
+          updatedAt: new Date(),
+        })
+        .where(eq(tags.id, id))
+        .returning();
 
-      if (duplicate.length > 0) {
+      tag = result[0];
+    } catch (error: unknown) {
+      if (isUniqueViolation(error)) {
         throw new ConflictError(`Tag with name '${input.name}' already exists for this device`);
       }
+      throw error;
     }
 
-    const result = await db
-      .update(tags)
-      .set({
-        ...input,
-        updatedAt: new Date(),
-      })
-      .where(eq(tags.id, id))
-      .returning();
+    // Increment parent device config version
+    await deviceService.incrementConfigVersion(existingTag.deviceId);
 
-    const tag = result[0];
-
-    // Notify protocol gateways about tag update
-    await mqttService.notifyTagChange('update', tag);
+    // Notify protocol gateways (best-effort)
+    mqttService.notifyTagChange('update', tag).catch((err) => {
+      logger.error({ err, tagId: tag.id }, 'Failed to send MQTT tag update notification');
+    });
 
     return tag;
   }
@@ -234,8 +289,13 @@ export class TagService {
 
     await db.delete(tags).where(eq(tags.id, id));
 
-    // Notify protocol gateways about tag deletion
-    await mqttService.notifyTagChange('delete', tag);
+    // Increment parent device config version
+    await deviceService.incrementConfigVersion(tag.deviceId);
+
+    // Notify protocol gateways (best-effort)
+    mqttService.notifyTagChange('delete', tag).catch((err) => {
+      logger.error({ err, tagId: tag.id }, 'Failed to send MQTT tag delete notification');
+    });
   }
 
   /**
@@ -249,4 +309,3 @@ export class TagService {
 
 // Singleton instance
 export const tagService = new TagService();
-

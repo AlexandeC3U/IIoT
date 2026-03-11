@@ -5,16 +5,20 @@ import { z } from 'zod';
 // ============================================================================
 
 const modbusConfigSchema = z.object({
-  unitId: z.number().int().min(1).max(247),
+  slaveId: z.number().int().min(1).max(247),
   timeout: z.number().int().positive().optional(),
-  byteOrder: z.enum(['big', 'little']).optional(),
+  retryCount: z.number().int().min(0).max(10).optional(),
+  retryDelay: z.number().int().positive().optional(),
 });
 
 const opcuaConfigSchema = z.object({
   securityPolicy: z.enum(['None', 'Basic128Rsa15', 'Basic256', 'Basic256Sha256']).optional(),
   securityMode: z.enum(['None', 'Sign', 'SignAndEncrypt']).optional(),
-  certificatePath: z.string().optional(),
-  privateKeyPath: z.string().optional(),
+  authMode: z.enum(['anonymous', 'username', 'certificate']).optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  endpointUrl: z.string().optional(),
+  useSubscriptions: z.boolean().optional(),
 });
 
 const s7ConfigSchema = z.object({
@@ -24,6 +28,23 @@ const s7ConfigSchema = z.object({
   timeout: z.number().int().positive().optional(),
 });
 
+const mqttProtocolConfigSchema = z.object({
+  brokerUrl: z.string().min(1),
+  clientId: z.string().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  topicFilter: z.string().optional(),
+  qos: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional(),
+});
+
+// ============================================================================
+// Shared constants
+// ============================================================================
+
+export const PROTOCOLS = ['modbus', 'opcua', 's7', 'mqtt', 'bacnet', 'ethernetip'] as const;
+export const DEVICE_STATUSES = ['online', 'offline', 'error', 'unknown', 'connecting'] as const;
+export const SETUP_STATUSES = ['created', 'connected', 'configured', 'active'] as const;
+
 // ============================================================================
 // Device schemas
 // ============================================================================
@@ -32,11 +53,12 @@ const s7ConfigSchema = z.object({
 const deviceBaseSchema = z.object({
   name: z.string().min(1).max(255),
   description: z.string().optional(),
-  protocol: z.enum(['modbus', 'opcua', 's7']),
+  protocol: z.enum(PROTOCOLS),
   enabled: z.boolean().default(true),
   host: z.string().min(1).max(255),
   port: z.number().int().min(1).max(65535),
   protocolConfig: z.record(z.unknown()).optional(),
+  unsPrefix: z.string().max(512).optional(),
   pollIntervalMs: z.number().int().min(50).max(3600000).default(1000),
   location: z.string().max(255).optional(),
   metadata: z.record(z.unknown()).optional(),
@@ -44,7 +66,6 @@ const deviceBaseSchema = z.object({
 
 // Create schema with protocol config validation
 export const createDeviceSchema = deviceBaseSchema.superRefine((data, ctx) => {
-  // Validate protocol-specific config
   if (data.protocolConfig) {
     let result;
     switch (data.protocol) {
@@ -57,6 +78,10 @@ export const createDeviceSchema = deviceBaseSchema.superRefine((data, ctx) => {
       case 's7':
         result = s7ConfigSchema.safeParse(data.protocolConfig);
         break;
+      case 'mqtt':
+        result = mqttProtocolConfigSchema.safeParse(data.protocolConfig);
+        break;
+      // bacnet, ethernetip: no config validation yet (future protocols)
     }
     if (result && !result.success) {
       ctx.addIssue({
@@ -76,8 +101,9 @@ export const deviceIdSchema = z.object({
 });
 
 export const deviceQuerySchema = z.object({
-  protocol: z.enum(['modbus', 'opcua', 's7']).optional(),
-  status: z.enum(['online', 'offline', 'error', 'unknown']).optional(),
+  protocol: z.enum(PROTOCOLS).optional(),
+  status: z.enum(DEVICE_STATUSES).optional(),
+  setupStatus: z.enum(SETUP_STATUSES).optional(),
   enabled: z
     .string()
     .transform((v) => v === 'true')

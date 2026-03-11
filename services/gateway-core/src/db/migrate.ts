@@ -50,7 +50,7 @@ async function setupSchema(): Promise<void> {
   // Create enums if they don't exist
   await db.execute(sql`
     DO $$ BEGIN
-      CREATE TYPE protocol AS ENUM ('modbus', 'opcua', 's7');
+      CREATE TYPE protocol AS ENUM ('modbus', 'opcua', 's7', 'mqtt', 'bacnet', 'ethernetip');
     EXCEPTION
       WHEN duplicate_object THEN null;
     END $$;
@@ -58,7 +58,15 @@ async function setupSchema(): Promise<void> {
 
   await db.execute(sql`
     DO $$ BEGIN
-      CREATE TYPE device_status AS ENUM ('online', 'offline', 'error', 'unknown');
+      CREATE TYPE device_status AS ENUM ('online', 'offline', 'error', 'unknown', 'connecting');
+    EXCEPTION
+      WHEN duplicate_object THEN null;
+    END $$;
+  `);
+
+  await db.execute(sql`
+    DO $$ BEGIN
+      CREATE TYPE setup_status AS ENUM ('created', 'connected', 'configured', 'active');
     EXCEPTION
       WHEN duplicate_object THEN null;
     END $$;
@@ -87,10 +95,13 @@ async function setupSchema(): Promise<void> {
       host VARCHAR(255) NOT NULL,
       port INTEGER NOT NULL,
       protocol_config JSONB DEFAULT '{}'::jsonb,
+      uns_prefix VARCHAR(512),
       poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
+      config_version INTEGER NOT NULL DEFAULT 1,
       status device_status NOT NULL DEFAULT 'unknown',
       last_seen TIMESTAMPTZ,
       last_error TEXT,
+      setup_status setup_status NOT NULL DEFAULT 'created',
       location VARCHAR(255),
       metadata JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -108,17 +119,40 @@ async function setupSchema(): Promise<void> {
       enabled BOOLEAN NOT NULL DEFAULT true,
       address VARCHAR(512) NOT NULL,
       data_type tag_data_type NOT NULL,
-      scale_factor INTEGER,
-      scale_offset INTEGER,
-      clamp_min INTEGER,
-      clamp_max INTEGER,
+      scale_factor DOUBLE PRECISION,
+      scale_offset DOUBLE PRECISION,
+      clamp_min DOUBLE PRECISION,
+      clamp_max DOUBLE PRECISION,
       engineering_units VARCHAR(50),
-      deadband_absolute INTEGER,
-      deadband_percent INTEGER,
-      custom_topic VARCHAR(512),
+      deadband_type VARCHAR(20) DEFAULT 'none',
+      deadband_value DOUBLE PRECISION,
+      access_mode VARCHAR(20) DEFAULT 'read',
+      priority SMALLINT DEFAULT 0,
+      byte_order VARCHAR(20),
+      register_type VARCHAR(30),
+      register_count SMALLINT,
+      opc_node_id VARCHAR(512),
+      opc_namespace_uri VARCHAR(512),
+      s7_address VARCHAR(255),
+      topic_suffix VARCHAR(512),
       metadata JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  // Create audit_log table
+  await db.execute(sql`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_sub VARCHAR(255),
+      username VARCHAR(255),
+      action VARCHAR(50) NOT NULL,
+      resource_type VARCHAR(50),
+      resource_id UUID,
+      details JSONB,
+      ip_address VARCHAR(45),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -137,6 +171,15 @@ async function setupSchema(): Promise<void> {
   `);
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS tags_device_idx ON tags(device_id);
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_sub);
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS audit_log_resource_idx ON audit_log(resource_type, resource_id);
+  `);
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at DESC);
   `);
 
   logger.info('Database schema setup complete');

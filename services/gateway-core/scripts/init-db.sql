@@ -1,10 +1,8 @@
 -- =============================================================================
--- NEXUS Edge - Gateway Core Database Initialization
--- Creates the configuration database schema
+-- NEXUS Edge - Gateway Core Database Initialization (V2)
+-- Single source of truth for the config database schema.
+-- Must stay in sync with: services/gateway-core/src/db/schema.ts
 -- =============================================================================
-
--- Create database if not exists (run as superuser)
--- CREATE DATABASE nexus_config;
 
 -- Enable UUID extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -14,13 +12,19 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- =============================================================================
 
 DO $$ BEGIN
-    CREATE TYPE protocol AS ENUM ('modbus', 'opcua', 's7');
+    CREATE TYPE protocol AS ENUM ('modbus', 'opcua', 's7', 'mqtt', 'bacnet', 'ethernetip');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
 
 DO $$ BEGIN
-    CREATE TYPE device_status AS ENUM ('online', 'offline', 'error', 'unknown');
+    CREATE TYPE device_status AS ENUM ('online', 'offline', 'error', 'unknown', 'connecting');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE setup_status AS ENUM ('created', 'connected', 'configured', 'active');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -41,66 +45,98 @@ END $$;
 
 -- Devices table
 CREATE TABLE IF NOT EXISTS devices (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    protocol protocol NOT NULL,
-    enabled BOOLEAN NOT NULL DEFAULT true,
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                VARCHAR(255) NOT NULL,
+    description         TEXT,
+    protocol            protocol NOT NULL,
+    enabled             BOOLEAN NOT NULL DEFAULT true,
 
     -- Connection settings
-    host VARCHAR(255) NOT NULL,
-    port INTEGER NOT NULL,
-    protocol_config JSONB DEFAULT '{}'::jsonb,
+    host                VARCHAR(255) NOT NULL,
+    port                INTEGER NOT NULL,
+    protocol_config     JSONB DEFAULT '{}'::jsonb,
+
+    -- UNS prefix for MQTT topic hierarchy
+    uns_prefix          VARCHAR(512),
 
     -- Polling configuration
-    poll_interval_ms INTEGER NOT NULL DEFAULT 1000,
+    poll_interval_ms    INTEGER NOT NULL DEFAULT 1000,
 
-    -- Status
-    status device_status NOT NULL DEFAULT 'unknown',
-    last_seen TIMESTAMPTZ,
-    last_error TEXT,
+    -- Config version (incremented on device/tag changes)
+    config_version      INTEGER NOT NULL DEFAULT 1,
+
+    -- Status (updated by protocol gateway via MQTT)
+    status              device_status NOT NULL DEFAULT 'unknown',
+    last_seen           TIMESTAMPTZ,
+    last_error          TEXT,
+
+    -- Two-phase setup tracking
+    setup_status        setup_status NOT NULL DEFAULT 'created',
 
     -- Metadata
-    location VARCHAR(255),
-    metadata JSONB DEFAULT '{}'::jsonb,
+    location            VARCHAR(255),
+    metadata            JSONB DEFAULT '{}'::jsonb,
 
     -- Timestamps
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Tags table
 CREATE TABLE IF NOT EXISTS tags (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    enabled BOOLEAN NOT NULL DEFAULT true,
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id           UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    name                VARCHAR(255) NOT NULL,
+    description         TEXT,
+    enabled             BOOLEAN NOT NULL DEFAULT true,
 
-    -- Address
-    address VARCHAR(512) NOT NULL,
-    data_type tag_data_type NOT NULL,
+    -- Address (protocol-specific)
+    address             VARCHAR(512) NOT NULL,
+    data_type           tag_data_type NOT NULL,
 
     -- Transformations
-    scale_factor INTEGER,
-    scale_offset INTEGER,
-    clamp_min INTEGER,
-    clamp_max INTEGER,
-    engineering_units VARCHAR(50),
+    scale_factor        DOUBLE PRECISION,
+    scale_offset        DOUBLE PRECISION,
+    clamp_min           DOUBLE PRECISION,
+    clamp_max           DOUBLE PRECISION,
+    engineering_units   VARCHAR(50),
 
-    -- Deadband (Phase 4)
-    deadband_absolute INTEGER,
-    deadband_percent INTEGER,
+    -- Deadband
+    deadband_type       VARCHAR(20) DEFAULT 'none',
+    deadband_value      DOUBLE PRECISION,
 
-    -- Custom topic
-    custom_topic VARCHAR(512),
+    -- Protocol-specific fields
+    access_mode         VARCHAR(20) DEFAULT 'read',
+    priority            SMALLINT DEFAULT 0,
+    byte_order          VARCHAR(20),
+    register_type       VARCHAR(30),
+    register_count      SMALLINT,
+    opc_node_id         VARCHAR(512),
+    opc_namespace_uri   VARCHAR(512),
+    s7_address          VARCHAR(255),
+
+    -- UNS topic suffix (appended to device's UNS prefix)
+    topic_suffix        VARCHAR(512),
 
     -- Metadata
-    metadata JSONB DEFAULT '{}'::jsonb,
+    metadata            JSONB DEFAULT '{}'::jsonb,
 
     -- Timestamps
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Audit log table
+CREATE TABLE IF NOT EXISTS audit_log (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_sub            VARCHAR(255),
+    username            VARCHAR(255),
+    action              VARCHAR(50) NOT NULL,
+    resource_type       VARCHAR(50),
+    resource_id         UUID,
+    details             JSONB,
+    ip_address          VARCHAR(45),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- =============================================================================
@@ -113,6 +149,10 @@ CREATE INDEX IF NOT EXISTS devices_status_idx ON devices(status);
 
 CREATE UNIQUE INDEX IF NOT EXISTS tags_device_tag_idx ON tags(device_id, name);
 CREATE INDEX IF NOT EXISTS tags_device_idx ON tags(device_id);
+
+CREATE INDEX IF NOT EXISTS audit_log_user_idx ON audit_log(user_sub);
+CREATE INDEX IF NOT EXISTS audit_log_resource_idx ON audit_log(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS audit_log_created_idx ON audit_log(created_at DESC);
 
 -- =============================================================================
 -- Triggers for updated_at
@@ -142,11 +182,10 @@ CREATE TRIGGER update_tags_updated_at
 -- Sample Data (for development)
 -- =============================================================================
 
--- Insert sample devices
 INSERT INTO devices (name, description, protocol, host, port, protocol_config, poll_interval_ms, location)
 VALUES
     ('PLC-001', 'Main production line PLC', 'modbus', '192.168.1.10', 502,
-     '{"unitId": 1, "timeout": 5000}'::jsonb, 1000, 'Building A - Line 1'),
+     '{"slaveId": 1, "timeout": 5000}'::jsonb, 1000, 'Building A - Line 1'),
     ('OPC-001', 'SCADA server OPC UA', 'opcua', '192.168.1.20', 4840,
      '{"securityPolicy": "Basic256Sha256", "securityMode": "SignAndEncrypt"}'::jsonb, 500, 'Control Room'),
     ('S7-001', 'Siemens S7-1500', 's7', '192.168.1.30', 102,
@@ -173,7 +212,8 @@ CROSS JOIN (VALUES
 WHERE d.name = 'PLC-001'
 ON CONFLICT (device_id, name) DO NOTHING;
 
--- Grant permissions (adjust user as needed)
--- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO nexus;
--- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO nexus;
+-- =============================================================================
+-- Done
+-- =============================================================================
 
+\echo 'NEXUS Edge - Gateway Core V2 config database initialized successfully!'

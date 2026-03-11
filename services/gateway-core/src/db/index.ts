@@ -9,6 +9,8 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: env.DATABASE_URL,
   max: env.DATABASE_POOL_SIZE,
+  statement_timeout: 30_000,   // 30s — kill runaway queries
+  idle_in_transaction_session_timeout: 60_000, // 60s — release stuck transactions
 });
 
 // Create drizzle instance with schema

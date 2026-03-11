@@ -1,12 +1,23 @@
-import { and, count, eq, ilike, or, sql } from 'drizzle-orm';
+import { count, eq, ilike, or, sql, and } from 'drizzle-orm';
 import { db } from '../../db/index.js';
-import { devices, tags, type Device, type NewDevice } from '../../db/schema.js';
+import { devices, tags, type Device, type NewDevice, type Tag } from '../../db/schema.js';
 import { ConflictError, NotFoundError } from '../../lib/errors.js';
+import { logger } from '../../lib/logger.js';
 import { mqttService } from '../../mqtt/client.js';
 import type { CreateDeviceInput, DeviceQuery, UpdateDeviceInput } from './schema.js';
 
+/** PostgreSQL unique_violation error code */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === '23505';
+}
+
+/** Escape LIKE/ILIKE wildcards to prevent injection */
+function escapeLike(value: string): string {
+  return value.replace(/[%_\\]/g, '\\$&');
+}
+
 export interface DeviceWithTags extends Device {
-  tags: typeof tags.$inferSelect[];
+  tags: Tag[];
 }
 
 export interface PaginatedResult<T> {
@@ -31,6 +42,10 @@ export class DeviceService {
       conditions.push(eq(devices.status, query.status));
     }
 
+    if (query.setupStatus) {
+      conditions.push(eq(devices.setupStatus, query.setupStatus));
+    }
+
     if (query.enabled !== undefined) {
       conditions.push(eq(devices.enabled, query.enabled));
     }
@@ -38,9 +53,9 @@ export class DeviceService {
     if (query.search) {
       conditions.push(
         or(
-          ilike(devices.name, `%${query.search}%`),
-          ilike(devices.description, `%${query.search}%`),
-          ilike(devices.location, `%${query.search}%`)
+          ilike(devices.name, `%${escapeLike(query.search)}%`),
+          ilike(devices.description, `%${escapeLike(query.search)}%`),
+          ilike(devices.location, `%${escapeLike(query.search)}%`)
         )
       );
     }
@@ -98,20 +113,16 @@ export class DeviceService {
   }
 
   /**
-   * Create a new device
+   * Get tags for a device (used by MQTT notifications)
+   */
+  async getDeviceTags(deviceId: string): Promise<Tag[]> {
+    return db.select().from(tags).where(eq(tags.deviceId, deviceId));
+  }
+
+  /**
+   * Create a new device (two-phase: device first, tags later)
    */
   async create(input: CreateDeviceInput): Promise<Device> {
-    // Check for duplicate name
-    const existing = await db
-      .select({ id: devices.id })
-      .from(devices)
-      .where(eq(devices.name, input.name))
-      .limit(1);
-
-    if (existing.length > 0) {
-      throw new ConflictError(`Device with name '${input.name}' already exists`);
-    }
-
     const newDevice: NewDevice = {
       name: input.name,
       description: input.description,
@@ -120,16 +131,27 @@ export class DeviceService {
       host: input.host,
       port: input.port,
       protocolConfig: input.protocolConfig ?? {},
+      unsPrefix: input.unsPrefix,
       pollIntervalMs: input.pollIntervalMs,
       location: input.location,
       metadata: input.metadata ?? {},
     };
 
-    const result = await db.insert(devices).values(newDevice).returning();
-    const device = result[0];
+    let device: Device;
+    try {
+      const result = await db.insert(devices).values(newDevice).returning();
+      device = result[0];
+    } catch (error: unknown) {
+      if (isUniqueViolation(error)) {
+        throw new ConflictError(`Device with name '${input.name}' already exists`);
+      }
+      throw error;
+    }
 
-    // Notify protocol gateways about new device
-    await mqttService.notifyDeviceChange('create', device);
+    // Notify protocol gateways (best-effort — don't fail HTTP on MQTT error)
+    mqttService.notifyDeviceChange('create', device).catch((err) => {
+      logger.error({ err, deviceId: device.id }, 'Failed to send MQTT device create notification');
+    });
 
     return device;
   }
@@ -141,32 +163,31 @@ export class DeviceService {
     // Check device exists
     await this.getById(id);
 
-    // Check for duplicate name if name is being changed
-    if (input.name) {
-      const existing = await db
-        .select({ id: devices.id })
-        .from(devices)
-        .where(and(eq(devices.name, input.name), sql`${devices.id} != ${id}`))
-        .limit(1);
+    let device: Device;
+    try {
+      // Increment config version on every update
+      const result = await db
+        .update(devices)
+        .set({
+          ...input,
+          configVersion: sql`${devices.configVersion} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(eq(devices.id, id))
+        .returning();
 
-      if (existing.length > 0) {
+      device = result[0];
+    } catch (error: unknown) {
+      if (isUniqueViolation(error)) {
         throw new ConflictError(`Device with name '${input.name}' already exists`);
       }
+      throw error;
     }
 
-    const result = await db
-      .update(devices)
-      .set({
-        ...input,
-        updatedAt: new Date(),
-      })
-      .where(eq(devices.id, id))
-      .returning();
-
-    const device = result[0];
-
-    // Notify protocol gateways about device update
-    await mqttService.notifyDeviceChange('update', device);
+    // Notify protocol gateways (best-effort)
+    mqttService.notifyDeviceChange('update', device).catch((err) => {
+      logger.error({ err, deviceId: device.id }, 'Failed to send MQTT device update notification');
+    });
 
     return device;
   }
@@ -179,16 +200,18 @@ export class DeviceService {
 
     await db.delete(devices).where(eq(devices.id, id));
 
-    // Notify protocol gateways about device deletion
-    await mqttService.notifyDeviceChange('delete', device);
+    // Notify protocol gateways (best-effort)
+    mqttService.notifyDeviceChange('delete', device).catch((err) => {
+      logger.error({ err, deviceId: device.id }, 'Failed to send MQTT device delete notification');
+    });
   }
 
   /**
-   * Update device status (called internally based on MQTT status updates)
+   * Update device status (called by MQTT status subscriber)
    */
   async updateStatus(
     id: string,
-    status: 'online' | 'offline' | 'error' | 'unknown',
+    status: 'online' | 'offline' | 'error' | 'unknown' | 'connecting',
     lastError?: string
   ): Promise<void> {
     await db
@@ -197,6 +220,35 @@ export class DeviceService {
         status,
         lastSeen: status === 'online' ? new Date() : undefined,
         lastError: lastError ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(devices.id, id));
+  }
+
+  /**
+   * Update device setup status (tracks two-phase setup progress)
+   */
+  async updateSetupStatus(
+    id: string,
+    setupStatus: 'created' | 'connected' | 'configured' | 'active'
+  ): Promise<void> {
+    await db
+      .update(devices)
+      .set({
+        setupStatus,
+        updatedAt: new Date(),
+      })
+      .where(eq(devices.id, id));
+  }
+
+  /**
+   * Increment config version for a device (called when its tags change)
+   */
+  async incrementConfigVersion(id: string): Promise<void> {
+    await db
+      .update(devices)
+      .set({
+        configVersion: sql`${devices.configVersion} + 1`,
         updatedAt: new Date(),
       })
       .where(eq(devices.id, id));
@@ -214,4 +266,3 @@ export class DeviceService {
 
 // Singleton instance
 export const deviceService = new DeviceService();
-

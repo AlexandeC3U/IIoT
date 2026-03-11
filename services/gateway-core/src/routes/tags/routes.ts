@@ -1,13 +1,41 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ValidationError } from '../../lib/errors.js';
+import { requireMinRole } from '../../middleware/rbac.js';
 import {
     bulkCreateTagsSchema,
     createTagSchema,
+    DATA_TYPES,
     tagIdSchema,
     tagQuerySchema,
     updateTagSchema,
 } from './schema.js';
 import { tagService } from './service.js';
+
+// Shared swagger property definitions for tag fields
+const tagBodyProperties = {
+  name: { type: 'string', minLength: 1, maxLength: 255 },
+  description: { type: 'string' },
+  enabled: { type: 'boolean', default: true },
+  address: { type: 'string', minLength: 1 },
+  dataType: { type: 'string', enum: [...DATA_TYPES] },
+  scaleFactor: { type: 'number' },
+  scaleOffset: { type: 'number' },
+  clampMin: { type: 'number' },
+  clampMax: { type: 'number' },
+  engineeringUnits: { type: 'string', maxLength: 50 },
+  deadbandType: { type: 'string', enum: ['none', 'absolute', 'percent'] },
+  deadbandValue: { type: 'number' },
+  accessMode: { type: 'string', enum: ['read', 'write', 'readwrite'] },
+  priority: { type: 'number' },
+  byteOrder: { type: 'string', enum: ['big_endian', 'little_endian'] },
+  registerType: { type: 'string', enum: ['holding', 'input', 'coil', 'discrete'] },
+  registerCount: { type: 'number' },
+  opcNodeId: { type: 'string' },
+  opcNamespaceUri: { type: 'string' },
+  s7Address: { type: 'string' },
+  topicSuffix: { type: 'string' },
+  metadata: { type: 'object' },
+} as const;
 
 export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // =========================================================================
@@ -21,21 +49,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
         type: 'object',
         properties: {
           deviceId: { type: 'string', format: 'uuid' },
-          dataType: {
-            type: 'string',
-            enum: [
-              'bool',
-              'int16',
-              'int32',
-              'int64',
-              'uint16',
-              'uint32',
-              'uint64',
-              'float32',
-              'float64',
-              'string',
-            ],
-          },
+          dataType: { type: 'string', enum: [...DATA_TYPES] },
           enabled: { type: 'string' },
           search: { type: 'string' },
           limit: { type: 'number', default: 100 },
@@ -95,42 +109,16 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /tags - Create new tag
   // =========================================================================
   fastify.post('/', {
+    preHandler: requireMinRole('engineer'),
     schema: {
-      description: 'Create a new tag',
+      description: 'Create a new tag (Phase 2 of two-phase device setup)',
       tags: ['Tags'],
       body: {
         type: 'object',
         required: ['deviceId', 'name', 'address', 'dataType'],
         properties: {
           deviceId: { type: 'string', format: 'uuid' },
-          name: { type: 'string', minLength: 1, maxLength: 255 },
-          description: { type: 'string' },
-          enabled: { type: 'boolean', default: true },
-          address: { type: 'string', minLength: 1 },
-          dataType: {
-            type: 'string',
-            enum: [
-              'bool',
-              'int16',
-              'int32',
-              'int64',
-              'uint16',
-              'uint32',
-              'uint64',
-              'float32',
-              'float64',
-              'string',
-            ],
-          },
-          scaleFactor: { type: 'number' },
-          scaleOffset: { type: 'number' },
-          clampMin: { type: 'number' },
-          clampMax: { type: 'number' },
-          engineeringUnits: { type: 'string', maxLength: 50 },
-          deadbandAbsolute: { type: 'number' },
-          deadbandPercent: { type: 'number' },
-          customTopic: { type: 'string' },
-          metadata: { type: 'object' },
+          ...tagBodyProperties,
         },
       },
       response: {
@@ -154,8 +142,9 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /tags/bulk - Bulk create tags
   // =========================================================================
   fastify.post('/bulk', {
+    preHandler: requireMinRole('engineer'),
     schema: {
-      description: 'Bulk create tags for a device',
+      description: 'Bulk create tags for a device (from browse results or manual entry)',
       tags: ['Tags'],
       body: {
         type: 'object',
@@ -169,17 +158,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
             items: {
               type: 'object',
               required: ['name', 'address', 'dataType'],
-              properties: {
-                name: { type: 'string' },
-                description: { type: 'string' },
-                enabled: { type: 'boolean' },
-                address: { type: 'string' },
-                dataType: { type: 'string' },
-                scaleFactor: { type: 'number' },
-                scaleOffset: { type: 'number' },
-                engineeringUnits: { type: 'string' },
-                metadata: { type: 'object' },
-              },
+              properties: tagBodyProperties,
             },
           },
         },
@@ -209,6 +188,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // PUT /tags/:id - Update tag
   // =========================================================================
   fastify.put<{ Params: { id: string } }>('/:id', {
+    preHandler: requireMinRole('engineer'),
     schema: {
       description: 'Update an existing tag',
       tags: ['Tags'],
@@ -221,22 +201,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
       },
       body: {
         type: 'object',
-        properties: {
-          name: { type: 'string' },
-          description: { type: 'string' },
-          enabled: { type: 'boolean' },
-          address: { type: 'string' },
-          dataType: { type: 'string' },
-          scaleFactor: { type: 'number' },
-          scaleOffset: { type: 'number' },
-          clampMin: { type: 'number' },
-          clampMax: { type: 'number' },
-          engineeringUnits: { type: 'string' },
-          deadbandAbsolute: { type: 'number' },
-          deadbandPercent: { type: 'number' },
-          customTopic: { type: 'string' },
-          metadata: { type: 'object' },
-        },
+        properties: tagBodyProperties,
       },
     },
     handler: async (request, reply) => {
@@ -259,6 +224,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // DELETE /tags/:id - Delete tag
   // =========================================================================
   fastify.delete<{ Params: { id: string } }>('/:id', {
+    preHandler: requireMinRole('engineer'),
     schema: {
       description: 'Delete a tag',
       tags: ['Tags'],
@@ -290,6 +256,7 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /tags/:id/toggle - Toggle tag enabled state
   // =========================================================================
   fastify.post<{ Params: { id: string } }>('/:id/toggle', {
+    preHandler: requireMinRole('operator'),
     schema: {
       description: 'Toggle tag enabled/disabled state',
       tags: ['Tags'],
@@ -312,4 +279,3 @@ export const tagRoutes: FastifyPluginAsync = async (fastify) => {
     },
   });
 };
-

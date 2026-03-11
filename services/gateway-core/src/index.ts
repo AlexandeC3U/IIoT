@@ -1,5 +1,6 @@
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import websocket from '@fastify/websocket';
@@ -10,8 +11,19 @@ import { closeDatabase } from './db/index.js';
 import { runMigrations } from './db/migrate.js';
 import { AppError } from './lib/errors.js';
 import { logger } from './lib/logger.js';
+import { registerMetrics } from './lib/metrics.js';
+import { registerAudit } from './middleware/audit.js';
+import { registerAuth } from './middleware/auth.js';
 import { mqttService } from './mqtt/client.js';
-import { deviceRoutes, healthRoutes, tagRoutes } from './routes/index.js';
+import { startStatusSubscriber } from './mqtt/subscriber.js';
+import {
+  deviceRoutes,
+  healthRoutes,
+  opcuaRoutes,
+  systemRoutes,
+  tagRoutes,
+} from './routes/index.js';
+import { registerWebSocketBridge, stopWebSocketBridge } from './websocket/bridge.js';
 
 // Create Fastify instance
 const app = Fastify({
@@ -29,6 +41,7 @@ const app = Fastify({
           }
         : undefined,
   },
+  bodyLimit: 1_048_576, // 1 MB — prevents oversized payloads
 });
 
 // ============================================================================
@@ -44,6 +57,17 @@ await app.register(helmet, {
   contentSecurityPolicy: false, // Disable for development
 });
 
+if (env.RATE_LIMIT_ENABLED) {
+  await app.register(rateLimit, {
+    max: env.RATE_LIMIT_MAX,
+    timeWindow: env.RATE_LIMIT_WINDOW,
+    keyGenerator: (request) => request.user?.sub ?? request.ip,
+    allowList: ['127.0.0.1', '::1'], // Allow localhost (health checks, internal)
+    addHeadersOnExceeding: { 'x-ratelimit-limit': true, 'x-ratelimit-remaining': true, 'x-ratelimit-reset': true },
+    addHeaders: { 'x-ratelimit-limit': true, 'x-ratelimit-remaining': true, 'x-ratelimit-reset': true, 'retry-after': true },
+  });
+}
+
 await app.register(websocket);
 
 // Swagger documentation
@@ -51,8 +75,8 @@ await app.register(swagger, {
   openapi: {
     info: {
       title: 'NEXUS Edge - Gateway Core API',
-      description: 'Central management API for device and tag configuration',
-      version: '0.1.0',
+      description: 'Central API gateway and configuration owner for the NEXUS Edge platform',
+      version: '2.0.0',
     },
     servers: [
       {
@@ -61,10 +85,23 @@ await app.register(swagger, {
       },
     ],
     tags: [
-      { name: 'Devices', description: 'Device management endpoints' },
+      { name: 'Devices', description: 'Device management and runtime proxy endpoints' },
       { name: 'Tags', description: 'Tag configuration endpoints' },
+      { name: 'OPC UA', description: 'OPC UA certificate management (proxied)' },
+      { name: 'System', description: 'System management and health endpoints' },
       { name: 'Health', description: 'Health check endpoints' },
     ],
+    components: {
+      securitySchemes: {
+        bearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'JWT',
+          description: 'JWT token from Authentik OIDC provider',
+        },
+      },
+    },
+    security: [{ bearerAuth: [] }],
   },
 });
 
@@ -77,6 +114,14 @@ await app.register(swaggerUi, {
 });
 
 // ============================================================================
+// Metrics, Authentication & Audit
+// ============================================================================
+
+await registerMetrics(app);
+await registerAuth(app);
+await registerAudit(app);
+
+// ============================================================================
 // Error Handler
 // ============================================================================
 
@@ -85,15 +130,22 @@ app.setErrorHandler((error, request, reply) => {
 
   // Log internal errors
   if (statusCode >= 500) {
-    app.log.error({ err: error, request: { method: request.method, url: request.url } }, message);
+    app.log.error(
+      { err: error, requestId: request.id, request: { method: request.method, url: request.url } },
+      message
+    );
   } else {
-    app.log.warn({ err: error, request: { method: request.method, url: request.url } }, message);
+    app.log.warn(
+      { err: error, requestId: request.id, request: { method: request.method, url: request.url } },
+      message
+    );
   }
 
   return reply.status(statusCode).send({
     error: {
       code: code || 'INTERNAL_ERROR',
       message: statusCode >= 500 ? 'Internal server error' : message,
+      requestId: request.id,
       details: env.NODE_ENV === 'development' ? details : undefined,
     },
   });
@@ -106,12 +158,17 @@ app.setErrorHandler((error, request, reply) => {
 await app.register(healthRoutes, { prefix: '/health' });
 await app.register(deviceRoutes, { prefix: '/api/devices' });
 await app.register(tagRoutes, { prefix: '/api/tags' });
+await app.register(opcuaRoutes, { prefix: '/api/opcua' });
+await app.register(systemRoutes, { prefix: '/api/system' });
+
+// WebSocket bridge (MQTT → WS for browser real-time updates)
+await registerWebSocketBridge(app);
 
 // Root route
 app.get('/', async () => {
   return {
     name: 'NEXUS Edge - Gateway Core',
-    version: '0.1.0',
+    version: '2.0.0',
     docs: '/docs',
     health: '/health',
   };
@@ -125,6 +182,9 @@ const shutdown = async (signal: string) => {
   logger.info({ signal }, 'Received shutdown signal');
 
   try {
+    stopWebSocketBridge();
+    logger.info('WebSocket bridge stopped');
+
     await app.close();
     logger.info('HTTP server closed');
 
@@ -154,9 +214,15 @@ async function start() {
     await runMigrations();
 
     // Connect to MQTT (non-blocking - will retry in background)
-    mqttService.connect().catch((error) => {
-      logger.warn({ error }, 'Initial MQTT connection failed, will retry...');
-    });
+    mqttService
+      .connect()
+      .then(async () => {
+        // Once connected, start the status subscriber
+        await startStatusSubscriber();
+      })
+      .catch((error) => {
+        logger.warn({ error }, 'Initial MQTT connection failed, will retry...');
+      });
 
     // Start HTTP server
     await app.listen({ port: env.PORT, host: env.HOST });
@@ -167,7 +233,7 @@ async function start() {
         host: env.HOST,
         docs: `http://${env.HOST}:${env.PORT}/docs`,
       },
-      '🚀 Gateway Core started'
+      'Gateway Core V2 started'
     );
   } catch (error) {
     logger.error({ error }, 'Failed to start server');

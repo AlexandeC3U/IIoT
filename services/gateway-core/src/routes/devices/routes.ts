@@ -1,9 +1,15 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { ValidationError } from '../../lib/errors.js';
+import { requireMinRole } from '../../middleware/rbac.js';
+import { proxyGet, proxyPost } from '../../proxy/protocol-gateway.js';
+import { deviceToProtocolGateway } from '../../mqtt/transform.js';
 import {
     createDeviceSchema,
     deviceIdSchema,
     deviceQuerySchema,
+    DEVICE_STATUSES,
+    PROTOCOLS,
+    SETUP_STATUSES,
     updateDeviceSchema,
 } from './schema.js';
 import { deviceService } from './service.js';
@@ -19,8 +25,9 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
       querystring: {
         type: 'object',
         properties: {
-          protocol: { type: 'string', enum: ['modbus', 'opcua', 's7'] },
-          status: { type: 'string', enum: ['online', 'offline', 'error', 'unknown'] },
+          protocol: { type: 'string', enum: [...PROTOCOLS] },
+          status: { type: 'string', enum: [...DEVICE_STATUSES] },
+          setupStatus: { type: 'string', enum: [...SETUP_STATUSES] },
           enabled: { type: 'string' },
           search: { type: 'string' },
           limit: { type: 'number', default: 50 },
@@ -87,8 +94,9 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /devices - Create new device
   // =========================================================================
   fastify.post('/', {
+    preHandler: requireMinRole('engineer'),
     schema: {
-      description: 'Create a new device',
+      description: 'Create a new device (Phase 1 of two-phase setup: device without tags)',
       tags: ['Devices'],
       body: {
         type: 'object',
@@ -96,11 +104,12 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
         properties: {
           name: { type: 'string', minLength: 1, maxLength: 255 },
           description: { type: 'string' },
-          protocol: { type: 'string', enum: ['modbus', 'opcua', 's7'] },
+          protocol: { type: 'string', enum: [...PROTOCOLS] },
           enabled: { type: 'boolean', default: true },
           host: { type: 'string', minLength: 1 },
           port: { type: 'number', minimum: 1, maximum: 65535 },
           protocolConfig: { type: 'object' },
+          unsPrefix: { type: 'string', maxLength: 512 },
           pollIntervalMs: { type: 'number', default: 1000 },
           location: { type: 'string' },
           metadata: { type: 'object' },
@@ -127,6 +136,7 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
   // PUT /devices/:id - Update device
   // =========================================================================
   fastify.put<{ Params: { id: string } }>('/:id', {
+    preHandler: requireMinRole('engineer'),
     schema: {
       description: 'Update an existing device',
       tags: ['Devices'],
@@ -146,6 +156,7 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
           host: { type: 'string' },
           port: { type: 'number' },
           protocolConfig: { type: 'object' },
+          unsPrefix: { type: 'string' },
           pollIntervalMs: { type: 'number' },
           location: { type: 'string' },
           metadata: { type: 'object' },
@@ -172,6 +183,7 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
   // DELETE /devices/:id - Delete device
   // =========================================================================
   fastify.delete<{ Params: { id: string } }>('/:id', {
+    preHandler: requireMinRole('engineer'),
     schema: {
       description: 'Delete a device and all its tags',
       tags: ['Devices'],
@@ -203,6 +215,7 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /devices/:id/toggle - Toggle device enabled state
   // =========================================================================
   fastify.post<{ Params: { id: string } }>('/:id/toggle', {
+    preHandler: requireMinRole('operator'),
     schema: {
       description: 'Toggle device enabled/disabled state',
       tags: ['Devices'],
@@ -224,5 +237,128 @@ export const deviceRoutes: FastifyPluginAsync = async (fastify) => {
       return reply.send(device);
     },
   });
-};
 
+  // =========================================================================
+  // POST /devices/:id/test - Test device connection (proxy to protocol-gateway)
+  // =========================================================================
+  fastify.post<{ Params: { id: string } }>('/:id/test', {
+    preHandler: requireMinRole('operator'),
+    config: {
+      rateLimit: { max: 10, timeWindow: '1 minute' },
+    },
+    schema: {
+      description: 'Test device connectivity (proxied to protocol-gateway)',
+      tags: ['Devices'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+        required: ['id'],
+      },
+    },
+    handler: async (request, reply) => {
+      const parsed = deviceIdSchema.safeParse(request.params);
+      if (!parsed.success) {
+        throw new ValidationError('Invalid device ID', parsed.error.flatten());
+      }
+
+      // Load device with tags, transform to PG format, proxy to test-connection
+      const device = await deviceService.getById(parsed.data.id, true);
+      const deviceTags = 'tags' in device ? device.tags : [];
+      const pgDevice = deviceToProtocolGateway(device, deviceTags);
+
+      const result = await proxyPost('/api/test-connection', pgDevice, {
+        requestId: request.id,
+        timeout: 30_000,
+      });
+
+      // On success, update setup status to 'connected'
+      if (device.setupStatus === 'created') {
+        await deviceService.updateSetupStatus(parsed.data.id, 'connected');
+      }
+
+      return reply.send(result);
+    },
+  });
+
+  // =========================================================================
+  // POST /devices/:id/browse - Browse device tags/addresses (proxy to protocol-gateway)
+  // =========================================================================
+  fastify.post<{ Params: { id: string }; Body: { node_id?: string; max_depth?: number } }>('/:id/browse', {
+    preHandler: requireMinRole('operator'),
+    config: {
+      rateLimit: { max: 10, timeWindow: '1 minute' },
+    },
+    schema: {
+      description: 'Browse device address space (protocol-agnostic, proxied to protocol-gateway)',
+      tags: ['Devices'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+        required: ['id'],
+      },
+      body: {
+        type: 'object',
+        properties: {
+          node_id: { type: 'string' },
+          max_depth: { type: 'number' },
+        },
+      },
+    },
+    handler: async (request, reply) => {
+      const parsed = deviceIdSchema.safeParse(request.params);
+      if (!parsed.success) {
+        throw new ValidationError('Invalid device ID', parsed.error.flatten());
+      }
+
+      // Verify device exists
+      await deviceService.getById(parsed.data.id);
+
+      const query: Record<string, string> = {};
+      if (request.body?.node_id) query.node_id = request.body.node_id;
+      if (request.body?.max_depth) query.max_depth = String(request.body.max_depth);
+
+      const result = await proxyGet(`/api/browse/${parsed.data.id}`, query, {
+        requestId: request.id,
+        timeout: 30_000,
+      });
+
+      return reply.send(result);
+    },
+  });
+
+  // =========================================================================
+  // GET /devices/:id/status - Device runtime status (proxy to protocol-gateway)
+  // =========================================================================
+  fastify.get<{ Params: { id: string } }>('/:id/status', {
+    schema: {
+      description: 'Get device runtime status and polling stats (proxied to protocol-gateway)',
+      tags: ['Devices'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+        },
+        required: ['id'],
+      },
+    },
+    handler: async (request, reply) => {
+      const parsed = deviceIdSchema.safeParse(request.params);
+      if (!parsed.success) {
+        throw new ValidationError('Invalid device ID', parsed.error.flatten());
+      }
+
+      // Verify device exists in our DB
+      await deviceService.getById(parsed.data.id);
+
+      const result = await proxyGet('/status', undefined, {
+        requestId: request.id,
+      });
+
+      return reply.send(result);
+    },
+  });
+};

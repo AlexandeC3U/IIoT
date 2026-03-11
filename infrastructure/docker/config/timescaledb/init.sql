@@ -1,128 +1,258 @@
 -- =============================================================================
--- NEXUS Edge - TimescaleDB Historian Initialization
--- Time-series storage for industrial data
+-- NEXUS Edge - TimescaleDB Historian Initialization (V2)
+-- Docker entrypoint script — mirrors config/timescaledb/init.sql
 -- =============================================================================
 
 -- Enable TimescaleDB extension
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 -- =============================================================================
--- Data Points Table (Hypertable)
+-- Core Metrics Table (Hypertable)
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS data_points (
+CREATE TABLE IF NOT EXISTS metrics (
     time        TIMESTAMPTZ NOT NULL,
-    device_id   TEXT NOT NULL,
-    tag_name    TEXT NOT NULL,
+    topic       TEXT NOT NULL,
     value       DOUBLE PRECISION,
-    quality     SMALLINT DEFAULT 0,
-    metadata    JSONB DEFAULT '{}'::jsonb
+    value_str   TEXT,
+    quality     SMALLINT DEFAULT 192,  -- OPC UA Good quality
+    metadata    JSONB DEFAULT '{}'::jsonb,
+
+    CONSTRAINT metrics_value_check CHECK (
+        value IS NOT NULL OR value_str IS NOT NULL
+    )
 );
 
--- Convert to hypertable (time-series optimized)
-SELECT create_hypertable('data_points', 'time',
+SELECT create_hypertable('metrics', 'time',
     chunk_time_interval => INTERVAL '1 day',
     if_not_exists => TRUE
 );
 
--- =============================================================================
 -- Indexes
--- =============================================================================
+CREATE INDEX IF NOT EXISTS idx_metrics_topic_time
+    ON metrics (topic, time DESC);
 
--- Composite index for common queries
-CREATE INDEX IF NOT EXISTS idx_data_points_device_tag_time
-    ON data_points (device_id, tag_name, time DESC);
-
--- Index for device lookups
-CREATE INDEX IF NOT EXISTS idx_data_points_device
-    ON data_points (device_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_metrics_metadata
+    ON metrics USING GIN (metadata);
 
 -- =============================================================================
--- Compression Policy (compress data older than 7 days)
--- =============================================================================
-
-ALTER TABLE data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'device_id, tag_name'
-);
-
-SELECT add_compression_policy('data_points', INTERVAL '7 days', if_not_exists => TRUE);
-
--- =============================================================================
--- Retention Policy (delete data older than 90 days - adjust as needed)
--- =============================================================================
-
-SELECT add_retention_policy('data_points', INTERVAL '90 days', if_not_exists => TRUE);
-
--- =============================================================================
--- Continuous Aggregates (pre-computed rollups)
+-- Continuous Aggregates
 -- =============================================================================
 
 -- 1-minute aggregates
-CREATE MATERIALIZED VIEW IF NOT EXISTS data_points_1min
+CREATE MATERIALIZED VIEW IF NOT EXISTS metrics_1min
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 minute', time) AS bucket,
-    device_id,
-    tag_name,
-    avg(value) AS avg_value,
-    min(value) AS min_value,
-    max(value) AS max_value,
-    count(*) AS sample_count
-FROM data_points
-GROUP BY bucket, device_id, tag_name
+    topic,
+    AVG(value) AS avg_value,
+    MIN(value) AS min_value,
+    MAX(value) AS max_value,
+    COUNT(*) AS sample_count,
+    FIRST(value, time) AS first_value,
+    LAST(value, time) AS last_value
+FROM metrics
+WHERE value IS NOT NULL
+GROUP BY bucket, topic
 WITH NO DATA;
 
--- Refresh policy for 1-minute aggregates
-SELECT add_continuous_aggregate_policy('data_points_1min',
-    start_offset => INTERVAL '1 hour',
+-- 1-hour aggregates
+CREATE MATERIALIZED VIEW IF NOT EXISTS metrics_1hour
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS bucket,
+    topic,
+    AVG(value) AS avg_value,
+    MIN(value) AS min_value,
+    MAX(value) AS max_value,
+    COUNT(*) AS sample_count,
+    FIRST(value, time) AS first_value,
+    LAST(value, time) AS last_value
+FROM metrics
+WHERE value IS NOT NULL
+GROUP BY bucket, topic
+WITH NO DATA;
+
+-- 1-day aggregates
+CREATE MATERIALIZED VIEW IF NOT EXISTS metrics_1day
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', time) AS bucket,
+    topic,
+    AVG(value) AS avg_value,
+    MIN(value) AS min_value,
+    MAX(value) AS max_value,
+    COUNT(*) AS sample_count,
+    FIRST(value, time) AS first_value,
+    LAST(value, time) AS last_value
+FROM metrics
+WHERE value IS NOT NULL
+GROUP BY bucket, topic
+WITH NO DATA;
+
+-- =============================================================================
+-- Refresh Policies
+-- =============================================================================
+
+SELECT add_continuous_aggregate_policy('metrics_1min',
+    start_offset => INTERVAL '3 hours',
     end_offset => INTERVAL '1 minute',
     schedule_interval => INTERVAL '1 minute',
     if_not_exists => TRUE
 );
 
--- 1-hour aggregates
-CREATE MATERIALIZED VIEW IF NOT EXISTS data_points_1hour
-WITH (timescaledb.continuous) AS
-SELECT
-    time_bucket('1 hour', time) AS bucket,
-    device_id,
-    tag_name,
-    avg(value) AS avg_value,
-    min(value) AS min_value,
-    max(value) AS max_value,
-    count(*) AS sample_count
-FROM data_points
-GROUP BY bucket, device_id, tag_name
-WITH NO DATA;
-
--- Refresh policy for 1-hour aggregates
-SELECT add_continuous_aggregate_policy('data_points_1hour',
-    start_offset => INTERVAL '1 day',
+SELECT add_continuous_aggregate_policy('metrics_1hour',
+    start_offset => INTERVAL '3 days',
     end_offset => INTERVAL '1 hour',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE
 );
 
+SELECT add_continuous_aggregate_policy('metrics_1day',
+    start_offset => INTERVAL '3 months',
+    end_offset => INTERVAL '1 day',
+    schedule_interval => INTERVAL '1 day',
+    if_not_exists => TRUE
+);
+
 -- =============================================================================
--- Create user for data ingestion service
+-- Retention Policies
 -- =============================================================================
 
-DO $$
+SELECT add_retention_policy('metrics', INTERVAL '30 days', if_not_exists => TRUE);
+SELECT add_retention_policy('metrics_1min', INTERVAL '90 days', if_not_exists => TRUE);
+SELECT add_retention_policy('metrics_1hour', INTERVAL '1 year', if_not_exists => TRUE);
+SELECT add_retention_policy('metrics_1day', INTERVAL '5 years', if_not_exists => TRUE);
+
+-- =============================================================================
+-- Compression Policy
+-- =============================================================================
+
+ALTER TABLE metrics SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'topic',
+    timescaledb.compress_orderby = 'time DESC'
+);
+
+SELECT add_compression_policy('metrics', INTERVAL '7 days', if_not_exists => TRUE);
+
+-- =============================================================================
+-- Helper Functions
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION get_optimal_aggregate(
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ
+) RETURNS TEXT AS $$
+DECLARE
+    time_range INTERVAL;
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_ingestion') THEN
-        CREATE USER nexus_ingestion WITH PASSWORD 'nexus_historian_secret';
+    time_range := p_end_time - p_start_time;
+
+    IF time_range <= INTERVAL '2 hours' THEN
+        RETURN 'metrics';
+    ELSIF time_range <= INTERVAL '7 days' THEN
+        RETURN 'metrics_1min';
+    ELSIF time_range <= INTERVAL '90 days' THEN
+        RETURN 'metrics_1hour';
+    ELSE
+        RETURN 'metrics_1day';
     END IF;
-END
-$$;
+END;
+$$ LANGUAGE plpgsql;
 
-GRANT ALL PRIVILEGES ON TABLE data_points TO nexus_ingestion;
-GRANT ALL PRIVILEGES ON TABLE data_points_1min TO nexus_ingestion;
-GRANT ALL PRIVILEGES ON TABLE data_points_1hour TO nexus_ingestion;
+CREATE OR REPLACE FUNCTION query_metrics(
+    p_topics TEXT[],
+    p_start_time TIMESTAMPTZ,
+    p_end_time TIMESTAMPTZ,
+    p_max_points INTEGER DEFAULT 1000
+) RETURNS TABLE (
+    bucket TIMESTAMPTZ,
+    topic TEXT,
+    avg_value DOUBLE PRECISION,
+    min_value DOUBLE PRECISION,
+    max_value DOUBLE PRECISION
+) AS $$
+DECLARE
+    time_range INTERVAL;
+    bucket_size INTERVAL;
+BEGIN
+    time_range := p_end_time - p_start_time;
+    bucket_size := time_range / p_max_points;
+
+    IF bucket_size < INTERVAL '1 minute' THEN
+        RETURN QUERY
+        SELECT
+            time_bucket(bucket_size, m.time) AS bucket,
+            m.topic,
+            AVG(m.value) AS avg_value,
+            MIN(m.value) AS min_value,
+            MAX(m.value) AS max_value
+        FROM metrics m
+        WHERE m.topic = ANY(p_topics)
+          AND m.time >= p_start_time
+          AND m.time <= p_end_time
+          AND m.value IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY bucket;
+    ELSIF bucket_size < INTERVAL '1 hour' THEN
+        RETURN QUERY
+        SELECT
+            time_bucket(bucket_size, m.bucket) AS bucket,
+            m.topic,
+            AVG(m.avg_value) AS avg_value,
+            MIN(m.min_value) AS min_value,
+            MAX(m.max_value) AS max_value
+        FROM metrics_1min m
+        WHERE m.topic = ANY(p_topics)
+          AND m.bucket >= p_start_time
+          AND m.bucket <= p_end_time
+        GROUP BY 1, 2
+        ORDER BY bucket;
+    ELSIF bucket_size < INTERVAL '1 day' THEN
+        RETURN QUERY
+        SELECT
+            time_bucket(bucket_size, m.bucket) AS bucket,
+            m.topic,
+            AVG(m.avg_value) AS avg_value,
+            MIN(m.min_value) AS min_value,
+            MAX(m.max_value) AS max_value
+        FROM metrics_1hour m
+        WHERE m.topic = ANY(p_topics)
+          AND m.bucket >= p_start_time
+          AND m.bucket <= p_end_time
+        GROUP BY 1, 2
+        ORDER BY bucket;
+    ELSE
+        RETURN QUERY
+        SELECT
+            time_bucket(bucket_size, m.bucket) AS bucket,
+            m.topic,
+            AVG(m.avg_value) AS avg_value,
+            MIN(m.min_value) AS min_value,
+            MAX(m.max_value) AS max_value
+        FROM metrics_1day m
+        WHERE m.topic = ANY(p_topics)
+          AND m.bucket >= p_start_time
+          AND m.bucket <= p_end_time
+        GROUP BY 1, 2
+        ORDER BY bucket;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
 
 -- =============================================================================
--- Done
+-- Grants
 -- =============================================================================
 
-\echo 'NEXUS Edge - TimescaleDB historian initialized successfully!'
+GRANT SELECT, INSERT ON metrics TO nexus_historian;
+GRANT SELECT ON metrics_1min, metrics_1hour, metrics_1day TO nexus_historian;
+GRANT EXECUTE ON FUNCTION query_metrics TO nexus_historian;
+GRANT EXECUTE ON FUNCTION get_optimal_aggregate TO nexus_historian;
 
+GRANT INSERT, SELECT ON metrics TO nexus_ingestion;
+GRANT SELECT ON metrics_1min, metrics_1hour, metrics_1day TO nexus_ingestion;
+GRANT EXECUTE ON FUNCTION query_metrics TO nexus_ingestion;
+GRANT EXECUTE ON FUNCTION get_optimal_aggregate TO nexus_ingestion;
+
+\echo 'NEXUS Edge - TimescaleDB historian initialized (V2)!'
