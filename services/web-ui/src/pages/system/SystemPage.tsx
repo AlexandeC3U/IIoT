@@ -1,188 +1,188 @@
 import { ArchitectureDiagram } from '@/components/system/ArchitectureDiagram';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { healthApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { useQuery } from '@tanstack/react-query';
-import { CheckCircle2, Clock, Database, Radio, RefreshCw, Server, XCircle } from 'lucide-react';
+import {
+  Activity,
+  CheckCircle2,
+  Clock,
+  Database,
+  Radio,
+  RefreshCw,
+  Server,
+  Wifi,
+  XCircle,
+} from 'lucide-react';
 
 export function SystemPage() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['health'],
     queryFn: () => healthApi.ready(),
-    refetchInterval: 10000, // Refresh every 10s
+    refetchInterval: 10000,
   });
 
   const formatUptime = (seconds: number) => {
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
-
     if (days > 0) return `${days}d ${hours}h ${mins}m`;
     if (hours > 0) return `${hours}h ${mins}m`;
     return `${mins}m`;
   };
 
+  const overallStatus = data?.status ?? 'unknown';
+
   return (
-    <div className="p-6">
+    <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold">System Overview</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Monitor the health and status of NEXUS Edge services
-          </p>
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-muted-foreground">
+          Monitor the health and status of all NEXUS Edge services
+        </p>
+        <div className="flex items-center gap-3">
+          <Badge
+            variant={overallStatus === 'healthy' ? 'online' : overallStatus === 'degraded' ? 'unknown' : 'error'}
+            className="px-3 py-1"
+          >
+            {overallStatus === 'healthy' ? 'All Systems Operational' : overallStatus === 'degraded' ? 'Degraded' : isLoading ? 'Checking...' : 'Unhealthy'}
+          </Badge>
+          <Button variant="outline" size="sm" onClick={() => refetch()} className="gap-2">
+            <RefreshCw className={cn('h-3.5 w-3.5', isLoading && 'animate-spin')} />
+            Refresh
+          </Button>
         </div>
-        <Button variant="outline" size="sm" onClick={() => refetch()} className="gap-2">
-          <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
-          Refresh
-        </Button>
       </div>
 
       {error ? (
-        <div className="rounded-lg border bg-card p-8 text-center">
+        <Card className="p-8 text-center">
           <XCircle className="h-12 w-12 mx-auto text-destructive" />
           <h3 className="mt-4 font-semibold">Connection Failed</h3>
-          <p className="text-sm text-muted-foreground mt-1">
-            Unable to connect to Gateway Core API
-          </p>
+          <p className="text-sm text-muted-foreground mt-1">Unable to connect to Gateway Core API</p>
           <Button variant="outline" className="mt-4" onClick={() => refetch()}>
             Retry
           </Button>
-        </div>
+        </Card>
       ) : (
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {/* Gateway Core Status */}
-          <StatusCard
-            title="Gateway Core"
-            icon={Server}
-            status={
-              data?.status === 'healthy'
-                ? 'online'
-                : data?.status === 'degraded'
-                  ? 'offline'
-                  : data?.status === 'unhealthy'
-                    ? 'error'
-                    : 'unknown'
-            }
-            loading={isLoading}
-          >
-            {data && (
-              <div className="mt-3 space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span className="capitalize font-medium">{data.status}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Uptime</span>
-                  <span className="font-mono">{formatUptime(data.uptime)}</span>
-                </div>
-              </div>
-            )}
-          </StatusCard>
+        <>
+          {/* Service Health Grid */}
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <ServiceCard
+              title="Gateway Core"
+              icon={Server}
+              status={data?.status === 'healthy' ? 'online' : data?.status === 'degraded' ? 'degraded' : 'error'}
+              loading={isLoading}
+              details={[
+                { label: 'Status', value: data?.status ?? '—', color: data?.status === 'healthy' ? 'text-emerald-400' : 'text-yellow-400' },
+                { label: 'Uptime', value: data ? formatUptime(data.uptime) : '—', mono: true },
+              ]}
+            />
 
-          {/* Database Status */}
-          <StatusCard
-            title="PostgreSQL"
-            icon={Database}
-            status={data?.checks.database.status === 'ok' ? 'online' : 'error'}
-            loading={isLoading}
-          >
-            {data?.checks.database && (
-              <div className="mt-3 space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span
-                    className={cn(
-                      'font-medium',
-                      data.checks.database.status === 'ok' ? 'text-emerald-500' : 'text-destructive'
-                    )}
-                  >
-                    {data.checks.database.status === 'ok' ? 'Connected' : 'Error'}
-                  </span>
-                </div>
-                {data.checks.database.latencyMs && (
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Latency</span>
-                    <span className="font-mono">{data.checks.database.latencyMs}ms</span>
-                  </div>
-                )}
-              </div>
-            )}
-          </StatusCard>
+            <ServiceCard
+              title="PostgreSQL"
+              icon={Database}
+              status={data?.checks.database.status === 'ok' ? 'online' : 'error'}
+              loading={isLoading}
+              details={[
+                { label: 'Status', value: data?.checks.database.status === 'ok' ? 'Connected' : 'Error', color: data?.checks.database.status === 'ok' ? 'text-emerald-400' : 'text-red-400' },
+                { label: 'Latency', value: data?.checks.database.latencyMs ? `${data.checks.database.latencyMs}ms` : '—', mono: true },
+              ]}
+            />
 
-          {/* MQTT Status */}
-          <StatusCard
-            title="MQTT Broker"
-            icon={Radio}
-            status={data?.checks.mqtt.connected ? 'online' : 'offline'}
-            loading={isLoading}
-          >
-            {data?.checks.mqtt && (
-              <div className="mt-3 space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Status</span>
-                  <span
-                    className={cn(
-                      'font-medium',
-                      data.checks.mqtt.connected ? 'text-emerald-500' : 'text-yellow-500'
-                    )}
-                  >
-                    {data.checks.mqtt.connected ? 'Connected' : 'Disconnected'}
-                  </span>
-                </div>
+            <ServiceCard
+              title="MQTT Broker"
+              icon={Radio}
+              status={data?.checks.mqtt.connected ? 'online' : 'offline'}
+              loading={isLoading}
+              details={[
+                { label: 'Status', value: data?.checks.mqtt.connected ? 'Connected' : 'Disconnected', color: data?.checks.mqtt.connected ? 'text-emerald-400' : 'text-yellow-400' },
+                { label: 'Broker', value: 'EMQX' },
+              ]}
+            />
+
+            <ServiceCard
+              title="WebSocket"
+              icon={Wifi}
+              status={data?.status === 'healthy' ? 'online' : 'offline'}
+              loading={isLoading}
+              details={[
+                { label: 'Bridge', value: data?.status === 'healthy' ? 'Active' : 'Inactive', color: data?.status === 'healthy' ? 'text-emerald-400' : 'text-slate-400' },
+                { label: 'Protocol', value: 'MQTT→WS' },
+              ]}
+            />
+          </div>
+
+          {/* Architecture Diagram */}
+          <Card>
+            <CardHeader className="pb-4">
+              <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-muted-foreground" />
+                <CardTitle className="text-base">Service Architecture</CardTitle>
               </div>
-            )}
-          </StatusCard>
-        </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              <ArchitectureDiagram />
+            </CardContent>
+          </Card>
+        </>
       )}
-
-      {/* Service Architecture - Interactive Diagram */}
-      <div className="mt-8">
-        <h2 className="text-lg font-semibold mb-4">Service Architecture</h2>
-        <ArchitectureDiagram />
-      </div>
     </div>
   );
 }
 
-interface StatusCardProps {
+interface ServiceCardProps {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
-  status: 'online' | 'offline' | 'error' | 'unknown';
+  status: 'online' | 'offline' | 'degraded' | 'error';
   loading?: boolean;
-  children?: React.ReactNode;
+  details: Array<{ label: string; value: string; color?: string; mono?: boolean }>;
 }
 
-function StatusCard({ title, icon: Icon, status, loading, children }: StatusCardProps) {
+function ServiceCard({ title, icon: Icon, status, loading, details }: ServiceCardProps) {
   const statusConfig = {
-    online: { color: 'text-emerald-500', bg: 'bg-emerald-500/10', label: 'Online' },
-    offline: { color: 'text-slate-500', bg: 'bg-slate-500/10', label: 'Offline' },
-    error: { color: 'text-destructive', bg: 'bg-destructive/10', label: 'Error' },
-    unknown: { color: 'text-yellow-500', bg: 'bg-yellow-500/10', label: 'Unknown' },
+    online: { iconBg: 'bg-emerald-500/10', iconColor: 'text-emerald-500' },
+    offline: { iconBg: 'bg-slate-500/10', iconColor: 'text-slate-400' },
+    degraded: { iconBg: 'bg-yellow-500/10', iconColor: 'text-yellow-500' },
+    error: { iconBg: 'bg-red-500/10', iconColor: 'text-red-500' },
   };
 
   const config = statusConfig[status];
+  const stripColor = status === 'online' ? 'bg-emerald-500/20' : status === 'error' ? 'bg-red-500/20' : status === 'degraded' ? 'bg-yellow-500/20' : 'bg-slate-500/10';
 
   return (
-    <div className="rounded-lg border bg-card p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className={cn('p-2 rounded-lg', config.bg)}>
-            <Icon className={cn('h-5 w-5', config.color)} />
+    <Card className="relative overflow-hidden">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-3">
+            <div className={cn('p-2 rounded-lg', config.iconBg)}>
+              <Icon className={cn('h-4 w-4', config.iconColor)} />
+            </div>
+            <h3 className="font-medium text-sm">{title}</h3>
           </div>
-          <div>
-            <h3 className="font-medium">{title}</h3>
-          </div>
+          {loading ? (
+            <Clock className="h-4 w-4 text-muted-foreground animate-pulse" />
+          ) : status === 'online' ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+          ) : (
+            <XCircle className={cn('h-4 w-4', config.iconColor)} />
+          )}
         </div>
-        {loading ? (
-          <Clock className="h-5 w-5 text-muted-foreground animate-pulse" />
-        ) : status === 'online' ? (
-          <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-        ) : (
-          <XCircle className={cn('h-5 w-5', config.color)} />
-        )}
-      </div>
-      {children}
-    </div>
+
+        <div className="space-y-2">
+          {details.map((detail) => (
+            <div key={detail.label} className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">{detail.label}</span>
+              <span className={cn('font-medium', detail.mono && 'font-mono', detail.color)}>
+                {detail.value}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className={cn('absolute top-0 right-0 w-1 h-full', stripColor)} />
+      </CardContent>
+    </Card>
   );
 }

@@ -15,6 +15,120 @@ spec:
     - Egress
 
 ---
+# Gateway Core Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-core
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: gateway-core
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gateway-core
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow HTTP from outside the cluster (via ingress controller)
+    - from: []
+      ports:
+        - port: 3001
+          protocol: TCP
+    # Allow metrics scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 3001
+          protocol: TCP
+  egress:
+    # Allow PostgreSQL to config DB
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Allow MQTT to EMQX
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: emqx
+      ports:
+        - port: 1883
+          protocol: TCP
+    # Allow HTTP to protocol-gateway (proxy)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: protocol-gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow Authentik OIDC (JWKS fetch) - external
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+
+---
+# PostgreSQL (Config DB) Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: nexus-edge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow PostgreSQL from gateway-core only
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway-core
+      ports:
+        - port: 5432
+          protocol: TCP
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
 # Protocol Gateway Network Policy
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -40,11 +154,21 @@ spec:
       ports:
         - port: 8081
           protocol: TCP
-    # Allow internal HTTP access
+    # Allow HTTP from gateway-core (proxy)
     - from:
-        - podSelector: {}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway-core
       ports:
         - port: 8080
+          protocol: TCP
+    # Allow health checks and metrics scraping from monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - port: 8081
           protocol: TCP
   egress:
     # Allow MQTT to EMQX
@@ -171,6 +295,14 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: data-ingestion
+      ports:
+        - port: 1883
+          protocol: TCP
+    # Allow MQTT from gateway-core
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gateway-core
       ports:
         - port: 1883
           protocol: TCP

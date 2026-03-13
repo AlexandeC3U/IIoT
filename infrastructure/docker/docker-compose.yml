@@ -50,11 +50,11 @@ services:
       - EMQX_LISTENERS__TCP__DEFAULT__MAX_CONNECTIONS=100000
       - EMQX_MQTT__MAX_TOPIC_LEVELS=10
     ports:
-      - "1884:1883"      # MQTT TCP
-      - "8883:8883"      # MQTT SSL
-      - "8083:8083"      # MQTT WebSocket
-      - "8084:8084"      # MQTT WebSocket SSL
-      - "18083:18083"    # Dashboard (internal only in prod)
+      - "1884:1883" # MQTT TCP
+      - "8883:8883" # MQTT SSL
+      - "8083:8083" # MQTT WebSocket
+      - "8084:8084" # MQTT WebSocket SSL
+      - "18083:18083" # Dashboard (internal only in prod)
     volumes:
       - emqx-data:/opt/emqx/data
       - emqx-log:/opt/emqx/log
@@ -93,7 +93,11 @@ services:
     networks:
       - nexus-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${HISTORIAN_USER:-nexus} -d ${HISTORIAN_DB:-nexus_historian}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${HISTORIAN_USER:-nexus} -d ${HISTORIAN_DB:-nexus_historian}",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -133,7 +137,11 @@ services:
     networks:
       - nexus-internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus_config}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus_config}",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -167,11 +175,19 @@ services:
       - MQTT_CLIENT_ID=gateway-core
       - MQTT_USERNAME=${MQTT_GATEWAY_USER:-gateway}
       - MQTT_PASSWORD=${MQTT_GATEWAY_PASS:-gateway_secret}
+      # Service discovery (proxy targets)
+      - PROTOCOL_GATEWAY_URL=http://protocol-gateway:8080
+      - DATA_INGESTION_URL=http://data-ingestion:8080
       # CORS (for frontend)
       - CORS_ORIGIN=http://localhost:5173,http://localhost:8080,http://web-ui
-      # JWT (for future auth)
-      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
-      - JWT_EXPIRES_IN=24h
+      # Auth (Authentik OIDC — disabled by default, enable when Authentik is deployed)
+      - AUTH_ENABLED=${AUTH_ENABLED:-false}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-}
+      # Audit logging
+      - AUDIT_ENABLED=${AUDIT_ENABLED:-false}
+      # Rate limiting
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-false}
     ports:
       - "3001:3001"
     volumes:
@@ -184,7 +200,15 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health/live"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3001/health/live",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -214,8 +238,8 @@ services:
       - MQTT_USERNAME=${MQTT_PROTOCOL_USER:-}
       - MQTT_PASSWORD=${MQTT_PROTOCOL_PASS:-}
       # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=json
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - LOG_FORMAT=console
       # API Security (enable in production)
       - API_AUTH_ENABLED=${API_AUTH_ENABLED:-false}
       - API_KEY=${API_KEY:-}
@@ -223,22 +247,30 @@ services:
       - GOMAXPROCS=4
       - GOGC=100
     ports:
-      - "8085:8080"    # API, health, metrics (avoid conflict with web-ui:8080)
+      - "8085:8080" # API, health, metrics (avoid conflict with web-ui:8080)
     volumes:
       # Device configuration (can also use ConfigMap in K8s)
-      - ../../services/protocol-gateway/config/devices.yaml:/app/config/devices.yaml:ro
+      - ../../services/protocol-gateway/config/devices.yaml:/app/config/devices.yaml
       # PKI trust store for OPC UA certificates (persistent)
       - protocol-gateway-pki:/app/certs/pki
       # Optional: Docker socket for container log access in Web UI
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - nexus-internal
-      - nexus-ot  # Access to OT network for PLC communication
+      - nexus-ot # Access to OT network for PLC communication
     depends_on:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/health/live",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -283,7 +315,15 @@ services:
       emqx:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health/live"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/health/live",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -341,10 +381,10 @@ services:
       - web-ui
       - gateway-core
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MONITORING (Prometheus + Grafana)
-# Start with: docker-compose --profile monitoring up
-# ═══════════════════════════════════════════════════════════════════════════
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MONITORING (Prometheus + Grafana)
+  # Start with: docker-compose --profile monitoring up
+  # ═══════════════════════════════════════════════════════════════════════════
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Prometheus - Metrics Collection
@@ -356,13 +396,13 @@ services:
     hostname: prometheus
     restart: unless-stopped
     profiles:
-      - monitoring  # Only start with: docker-compose --profile monitoring up
+      - monitoring # Only start with: docker-compose --profile monitoring up
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.enable-lifecycle'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
     ports:
       - "9090:9090"
     volumes:
@@ -371,7 +411,15 @@ services:
     networks:
       - nexus-internal
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9090/-/healthy",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -386,10 +434,11 @@ services:
     hostname: grafana
     restart: unless-stopped
     profiles:
-      - monitoring  # Only start with: docker-compose --profile monitoring up
+      - monitoring # Only start with: docker-compose --profile monitoring up
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ALLOW_EMBEDDING=true
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s:%(http_port)s/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
@@ -412,7 +461,6 @@ services:
       timescaledb:
         condition: service_healthy
 
-
   # ─────────────────────────────────────────────────────────────────────────────
   # OPC UA Simulator for testing
   # ─────────────────────────────────────────────────────────────────────────────
@@ -422,7 +470,7 @@ services:
       dockerfile: Dockerfile
     container_name: nexus-opcua-sim
     profiles:
-      - testing  # Only start with: docker-compose --profile testing up
+      - testing # Only start with: docker-compose --profile testing up
     ports:
       - "4840:4840"
     environment:

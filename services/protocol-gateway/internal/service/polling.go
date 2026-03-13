@@ -56,6 +56,11 @@ type Publisher interface {
 	PublishBatch(ctx context.Context, dataPoints []*domain.DataPoint) error
 }
 
+// StatusPublisher publishes device status to MQTT so gateway-core can track it.
+type StatusPublisher interface {
+	PublishDeviceStatus(ctx context.Context, deviceID string, status string, lastError string, stats map[string]interface{}) error
+}
+
 // SubscriptionHandler handles push-based data delivery for protocols that
 // support server-side subscriptions (e.g., OPC UA Report-by-Exception).
 // When a device is configured for subscriptions, the polling service delegates
@@ -77,6 +82,7 @@ type PollingService struct {
 	config              PollingConfig
 	protocolManager     *domain.ProtocolManager
 	publisher           Publisher
+	statusPublisher     StatusPublisher     // Optional: publishes device status to MQTT
 	subscriptionHandler SubscriptionHandler // Optional: handles OPC UA subscriptions
 	logger              zerolog.Logger
 	metrics             *metrics.Registry
@@ -115,11 +121,13 @@ type devicePoller struct {
 	stopChan   chan struct{}
 	stopOnce   sync.Once
 	running    atomic.Bool
-	subscribed bool // true if using push-based subscriptions instead of polling
-	lastPoll   time.Time
-	lastError  error
-	stats      deviceStats
-	mu         sync.RWMutex
+	subscribed     bool // true if using push-based subscriptions instead of polling
+	lastPoll       time.Time
+	lastError      error
+	lastStatus     string    // last published status (for change detection)
+	lastStatusAt   time.Time // when status was last published
+	stats          deviceStats
+	mu             sync.RWMutex
 }
 
 // deviceStats tracks per-device statistics.
@@ -162,6 +170,11 @@ func NewPollingService(
 		workerPool:      make(chan struct{}, config.WorkerCount),
 		stats:           &PollingStats{},
 	}
+}
+
+// SetStatusPublisher sets the publisher for device status updates to MQTT.
+func (s *PollingService) SetStatusPublisher(sp StatusPublisher) {
+	s.statusPublisher = sp
 }
 
 // SetSubscriptionHandler sets the handler for push-based subscriptions.
@@ -498,7 +511,12 @@ func (s *PollingService) startDeviceSubscription(dp *devicePoller) {
 					Msg("Failed to publish subscription data point")
 			} else {
 				s.stats.PointsPublished.Add(1)
+				if s.metrics != nil {
+					s.metrics.PointsPublished.Add(1)
+				}
 			}
+			// Heartbeat status (deduplicated to every 60s inside publishDeviceStatus)
+			s.publishDeviceStatus(dp, "online", "")
 		}
 	}
 
@@ -519,6 +537,9 @@ func (s *PollingService) startDeviceSubscription(dp *devicePoller) {
 
 	dp.subscribed = true
 	dp.running.Store(true)
+
+	// Publish online status now that subscription is active
+	s.publishDeviceStatus(dp, "online", "")
 
 	s.logger.Info().
 		Str("device_id", dp.device.ID).
@@ -607,6 +628,8 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 			Err(err).
 			Str("device_id", dp.device.ID).
 			Msg("Failed to read tags")
+
+		s.publishDeviceStatus(dp, "error", err.Error())
 		return
 	}
 
@@ -677,6 +700,9 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 				Msg("Failed to publish some data points")
 		} else {
 			s.stats.PointsPublished.Add(uint64(len(goodPoints)))
+			if s.metrics != nil {
+				s.metrics.PointsPublished.Add(float64(len(goodPoints)))
+			}
 		}
 	}
 
@@ -695,6 +721,43 @@ func (s *PollingService) pollDevice(dp *devicePoller) {
 		Int("good_points", len(goodPoints)).
 		Dur("duration", duration).
 		Msg("Poll cycle completed")
+
+	// Publish status on state change or every 60s
+	s.publishDeviceStatus(dp, "online", "")
+}
+
+// publishDeviceStatus publishes a device status update to MQTT if the status
+// changed or hasn't been reported in the last 60 seconds.
+func (s *PollingService) publishDeviceStatus(dp *devicePoller, status string, lastError string) {
+	if s.statusPublisher == nil {
+		return
+	}
+
+	dp.mu.RLock()
+	prevStatus := dp.lastStatus
+	lastPublish := dp.lastStatusAt
+	dp.mu.RUnlock()
+
+	// Only publish on status change or every 60s as a heartbeat
+	if prevStatus == status && time.Since(lastPublish) < 60*time.Second {
+		return
+	}
+
+	stats := map[string]interface{}{
+		"total_polls":   dp.stats.pollCount.Load(),
+		"success_polls": dp.stats.pollCount.Load() - dp.stats.errorCount.Load(),
+		"failed_polls":  dp.stats.errorCount.Load(),
+	}
+
+	if err := s.statusPublisher.PublishDeviceStatus(s.ctx, dp.device.ID, status, lastError, stats); err != nil {
+		s.logger.Debug().Err(err).Str("device_id", dp.device.ID).Msg("Failed to publish device status")
+		return
+	}
+
+	dp.mu.Lock()
+	dp.lastStatus = status
+	dp.lastStatusAt = time.Now()
+	dp.mu.Unlock()
 }
 
 // getEnabledTags returns only the enabled tags for a device.

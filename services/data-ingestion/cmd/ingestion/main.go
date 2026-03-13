@@ -12,6 +12,7 @@ import (
 	_ "net/http/pprof" // registers pprof handlers on http.DefaultServeMux
 
 	"github.com/nexus-edge/data-ingestion/internal/adapter/config"
+	queryhttp "github.com/nexus-edge/data-ingestion/internal/adapter/http"
 	"github.com/nexus-edge/data-ingestion/internal/adapter/mqtt"
 	"github.com/nexus-edge/data-ingestion/internal/adapter/timescaledb"
 	"github.com/nexus-edge/data-ingestion/internal/health"
@@ -105,6 +106,10 @@ func main() {
 	publicMux.HandleFunc("/health", healthChecker.HealthHandler)
 	publicMux.HandleFunc("/health/live", healthChecker.LiveHandler)
 	publicMux.HandleFunc("/health/ready", healthChecker.ReadyHandler)
+
+	// History query endpoints
+	historyHandler := queryhttp.NewHistoryHandler(dbWriter.Pool(), logger)
+	historyHandler.Register(publicMux)
 
 	server := &http.Server{
 		Addr:           fmt.Sprintf(":%d", cfg.HTTP.Port),

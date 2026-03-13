@@ -4,6 +4,16 @@ import { z } from 'zod';
 // Load .env file
 config();
 
+// z.coerce.boolean() treats any non-empty string as true (incl. "false").
+// This helper correctly parses env var strings like "false", "0", "no" as false.
+const booleanEnv = z
+  .union([z.boolean(), z.string()])
+  .transform((val) => {
+    if (typeof val === 'boolean') return val;
+    return !['false', '0', 'no', ''].includes(val.toLowerCase());
+  })
+  .default(false);
+
 const envSchema = z.object({
   // Server
   PORT: z.coerce.number().default(3001),
@@ -33,19 +43,19 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
 
   // Auth (Authentik OIDC)
-  AUTH_ENABLED: z.coerce.boolean().default(false),
+  AUTH_ENABLED: booleanEnv,
   OIDC_ISSUER_URL: z.string().optional(),
   OIDC_JWKS_URL: z.string().optional(), // Override JWKS endpoint (auto-discovered if not set)
   OIDC_AUDIENCE: z.string().optional(),
 
   // Audit logging (independent of auth — can audit anonymous actions too)
-  AUDIT_ENABLED: z.coerce.boolean().default(false),
+  AUDIT_ENABLED: booleanEnv,
 
   // WebSocket bridge
   WS_MAX_SUBSCRIPTIONS_PER_CLIENT: z.coerce.number().default(100),
 
   // Rate limiting
-  RATE_LIMIT_ENABLED: z.coerce.boolean().default(false),
+  RATE_LIMIT_ENABLED: booleanEnv,
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW: z.string().default('1 minute'),
 });

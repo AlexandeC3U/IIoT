@@ -48,10 +48,22 @@ export default {
           DEFAULT: 'hsl(38 92% 50%)',
           foreground: 'hsl(0 0% 0%)',
         },
+        // Delaware brand palette
+        delaware: {
+          red: '#c42828',
+          'dot-red': '#ef463c',
+          'sub-red-1': '#ee7684',
+          'sub-red-2': '#941914',
+          teal: '#72c4bf',
+          purple: '#ad9bcb',
+        },
         // Protocol colors
         modbus: 'hsl(221 83% 53%)',
-        opcua: 'hsl(142 76% 36%)',
-        s7: 'hsl(262 83% 58%)',
+        opcua: 'hsl(38 92% 50%)',
+        s7: 'hsl(142 71% 45%)',
+        mqtt: 'hsl(262 83% 58%)',
+        bacnet: 'hsl(174 35% 50%)',
+        ethernetip: 'hsl(30 80% 55%)',
       },
       borderRadius: {
         lg: 'var(--radius)',
@@ -59,8 +71,8 @@ export default {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        sans: ['Geist Sans', 'system-ui', 'sans-serif'],
-        mono: ['Geist Mono', 'JetBrains Mono', 'monospace'],
+        sans: ['IBM Plex Sans', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'IBM Plex Mono', 'monospace'],
       },
       keyframes: {
         'accordion-down': {

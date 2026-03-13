@@ -190,9 +190,18 @@ func main() {
 	// Devices with opc_use_subscriptions=true will use server-side subscriptions
 	// instead of polling, receiving data via Report-by-Exception.
 	pollingSvc.SetSubscriptionHandler(opcuaSubAdapter)
+	pollingSvc.SetStatusPublisher(mqttPublisher)
 
-	// Initialize device manager for web UI
-	deviceManager := api.NewDeviceManager(cfg.DevicesConfigPath, logger)
+	// Initialize MQTT-driven device manager with YAML cache for restart resilience.
+	// Device config is managed by gateway-core and synced via MQTT; the YAML file
+	// acts as a cache so polling can resume if gateway-core is temporarily unavailable.
+	deviceManager := service.NewMQTTDeviceManager(logger, cfg.DevicesConfigPath)
+
+	// Declare cmdHandler early so device lifecycle callbacks can reference it.
+	// It is created and started further below, but Go closures capture by
+	// reference so this is safe as long as it is non-nil before any config
+	// message arrives (which it will be — config sync happens after Start).
+	var cmdHandler *service.CommandHandler
 
 	// Set up callbacks for device lifecycle events
 	deviceManager.SetCallbacks(
@@ -206,7 +215,14 @@ func main() {
 					Msg("Device uses unsupported protocol, skipping registration")
 				return domain.ErrProtocolNotSupported
 			}
-			return pollingSvc.RegisterDevice(ctx, device)
+			err := pollingSvc.RegisterDevice(ctx, device)
+			if err == nil {
+				metricsRegistry.UpdateDeviceCount(deviceManager.DeviceCount(), 0)
+				if cmdHandler != nil {
+					cmdHandler.AddDevice(device)
+				}
+			}
+			return err
 		},
 		// On device edit - atomically replace config, preserving polling state
 		func(device *domain.Device) error {
@@ -218,69 +234,49 @@ func main() {
 					Msg("Device uses unsupported protocol, skipping registration")
 				return domain.ErrProtocolNotSupported
 			}
-			return pollingSvc.ReplaceDevice(ctx, device)
+			err := pollingSvc.ReplaceDevice(ctx, device)
+			if err == nil && cmdHandler != nil {
+				cmdHandler.AddDevice(device)
+			}
+			return err
 		},
 		// On device delete
 		func(id string) error {
 			pollingSvc.UnregisterDevice(id)
+			metricsRegistry.UpdateDeviceCount(deviceManager.DeviceCount(), 0)
+			if cmdHandler != nil {
+				cmdHandler.RemoveDevice(id)
+			}
 			return nil
 		},
 	)
 
-	// Load device configurations into the device manager (source for /api/devices)
-	if err := deviceManager.LoadDevices(); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to load device configurations")
-	}
-	devices := deviceManager.GetDevices()
-	logger.Info().Int("count", len(devices)).Msg("Loaded device configurations")
-
-	// Count devices by protocol and track unsupported
-	protocolCounts := make(map[domain.Protocol]int)
-	unsupportedCount := 0
-	for _, device := range devices {
-		if _, exists := protocolManager.GetPool(device.Protocol); !exists {
-			unsupportedCount++
-			logger.Warn().
-				Str("device_id", device.ID).
-				Str("protocol", string(device.Protocol)).
-				Msg("Device configured with unsupported protocol")
-			continue
+	// Load cached device configurations (for restart resilience).
+	// These will be reconciled when the MQTT sync response arrives.
+	cachedCount := deviceManager.LoadCache()
+	if cachedCount > 0 {
+		for _, device := range deviceManager.GetDevices() {
+			if _, exists := protocolManager.GetPool(device.Protocol); !exists {
+				continue
+			}
+			if err := pollingSvc.RegisterDevice(ctx, device); err != nil {
+				logger.Warn().Err(err).Str("device", device.ID).Msg("Failed to register cached device")
+			}
 		}
-		protocolCounts[device.Protocol]++
-	}
-	for protocol, count := range protocolCounts {
-		logger.Info().Str("protocol", string(protocol)).Int("devices", count).Msg("Protocol device count")
-	}
-	if unsupportedCount > 0 {
-		logger.Warn().Int("count", unsupportedCount).Msg("Devices with unsupported protocols skipped")
+		metricsRegistry.UpdateDeviceCount(cachedCount, 0)
 	}
 
-	// Register devices with polling service (with protocol validation)
-	registeredCount := 0
-	failedCount := 0
-	for _, device := range devices {
-		// Skip unsupported protocols
-		if _, exists := protocolManager.GetPool(device.Protocol); !exists {
-			continue
-		}
-		if err := pollingSvc.RegisterDevice(ctx, device); err != nil {
-			logger.Error().Err(err).Str("device", device.ID).Msg("Failed to register device")
-			failedCount++
-		} else {
-			registeredCount++
-		}
-	}
-
-	// Start polling service
+	// Start polling service (live config arrives via MQTT sync)
 	if err := pollingSvc.Start(ctx); err != nil {
 		logger.Fatal().Err(err).Msg("Failed to start polling service")
 	}
 
-	// Initialize command handler for bidirectional communication
-	cmdHandler := service.NewCommandHandler(
+	// Initialize command handler for bidirectional communication.
+	// Seed it with devices already known to the device manager (e.g. from cache).
+	cmdHandler = service.NewCommandHandler(
 		mqttPublisher.Client(),
 		protocolManager,
-		devices,
+		deviceManager.GetDevices(),
 		service.DefaultCommandConfig(),
 		logger,
 	)
@@ -290,6 +286,19 @@ func main() {
 		logger.Info().Msg("Command handler started - bidirectional communication enabled")
 	}
 	// Note: command handler is stopped explicitly during shutdown (not deferred).
+
+	// Initialize MQTT config subscriber (receives device config from gateway-core)
+	configSub := service.NewConfigSubscriber(
+		mqttPublisher.Client(),
+		deviceManager,
+		service.DefaultConfigSubscriberConfig(),
+		logger,
+	)
+	if err := configSub.Start(); err != nil {
+		logger.Warn().Err(err).Msg("Failed to start config subscriber (device sync disabled)")
+	} else {
+		logger.Info().Msg("Config subscriber started - devices will be synced from gateway-core")
+	}
 
 	// =============================================================
 	// Initialize Health Checks and HTTP Server
@@ -358,12 +367,13 @@ func main() {
 
 	// Web UI API endpoints
 	apiHandler := api.NewAPIHandler(deviceManager, logger)
+	apiHandler.SetConnectionTester(protocolManager)
 	apiHandler.SetTopicTracker(mqttPublisher)
 	apiHandler.SetSubscriptionProvider(cmdHandler)
 	apiHandler.SetLogProvider(api.NewDockerCLILogProvider(logger))
 
-	// Device management endpoints (protected - require auth for mutations)
-	mux.HandleFunc("/api/devices", apiMiddleware.Secure(func(w http.ResponseWriter, r *http.Request) {
+	// Device query endpoints (read-only — config is managed by gateway-core via MQTT)
+	mux.HandleFunc("/api/devices", apiMiddleware.ReadOnly(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
 			if r.URL.Query().Get("id") != "" {
@@ -371,14 +381,8 @@ func main() {
 			} else {
 				apiHandler.GetDevicesHandler(w, r)
 			}
-		case "POST":
-			apiHandler.CreateDeviceHandler(w, r)
-		case "PUT":
-			apiHandler.UpdateDeviceHandler(w, r)
-		case "DELETE":
-			apiHandler.DeleteDeviceHandler(w, r)
 		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			http.Error(w, "Method not allowed — device config is managed by gateway-core", http.StatusMethodNotAllowed)
 		}
 	}))
 
@@ -440,25 +444,12 @@ func main() {
 	// Mark gateway as ready for metrics scraping
 	gatewayReady.Store(true)
 
-	// Log successful startup with detailed summary
+	// Log successful startup
 	logger.Info().
-		Int("registered_devices", registeredCount).
-		Int("failed_devices", failedCount).
-		Int("unsupported_protocol_devices", unsupportedCount).
-		Int("modbus_devices", protocolCounts[domain.ProtocolModbusTCP]+protocolCounts[domain.ProtocolModbusRTU]).
-		Int("opcua_devices", protocolCounts[domain.ProtocolOPCUA]).
-		Int("s7_devices", protocolCounts[domain.ProtocolS7]).
 		Int("http_port", cfg.HTTP.Port).
 		Str("mqtt_broker", cfg.MQTT.BrokerURL).
-		Msg("Protocol Gateway started successfully")
-
-	// Log degraded state warning if any devices failed registration
-	if failedCount > 0 || unsupportedCount > 0 {
-		logger.Warn().
-			Int("failed", failedCount).
-			Int("unsupported", unsupportedCount).
-			Msg("Gateway started in degraded state - some devices not registered")
-	}
+		Str("config_source", "mqtt").
+		Msg("Protocol Gateway started successfully (devices will be synced from gateway-core via MQTT)")
 
 	// =============================================================
 	// Shutdown Handling
@@ -496,12 +487,17 @@ func main() {
 		logger.Error().Err(err).Msg("Error shutting down HTTP server")
 	}
 
-	// 3. Stop command handler (stop processing MQTT write commands)
+	// 3. Stop config subscriber (stop receiving device config changes)
+	if err := configSub.Stop(); err != nil {
+		logger.Error().Err(err).Msg("Error stopping config subscriber")
+	}
+
+	// 4. Stop command handler (stop processing MQTT write commands)
 	if err := cmdHandler.Stop(); err != nil {
 		logger.Error().Err(err).Msg("Error stopping command handler")
 	}
 
-	// 4. Stop polling service (cancel all device pollers, wait for workers)
+	// 5. Stop polling service (cancel all device pollers, wait for workers)
 	if err := pollingSvc.Stop(shutdownCtx); err != nil {
 		logger.Error().Err(err).Msg("Error stopping polling service")
 	}
@@ -539,7 +535,7 @@ func (a *opcuaSubscriptionAdapter) Unsubscribe(deviceID string) error {
 
 // handleBrowse handles OPC UA browse requests to explore the address space.
 // GET /api/browse/{deviceID}?node_id=ns=2;s=Demo&max_depth=1
-func handleBrowse(w http.ResponseWriter, r *http.Request, pool *opcua.ConnectionPool, deviceManager *api.DeviceManager, logger zerolog.Logger) {
+func handleBrowse(w http.ResponseWriter, r *http.Request, pool *opcua.ConnectionPool, deviceManager api.DeviceProvider, logger zerolog.Logger) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

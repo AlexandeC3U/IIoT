@@ -184,9 +184,13 @@ export class DeviceService {
       throw error;
     }
 
-    // Notify protocol gateways (best-effort)
-    mqttService.notifyDeviceChange('update', device).catch((err) => {
-      logger.error({ err, deviceId: device.id }, 'Failed to send MQTT device update notification');
+    // Notify protocol gateways with tags (best-effort)
+    this.getDeviceTags(device.id).then((deviceTags) => {
+      mqttService.notifyDeviceChange('update', device, deviceTags).catch((err) => {
+        logger.error({ err, deviceId: device.id }, 'Failed to send MQTT device update notification');
+      });
+    }).catch((err) => {
+      logger.error({ err, deviceId: device.id }, 'Failed to fetch tags for MQTT notification');
     });
 
     return device;

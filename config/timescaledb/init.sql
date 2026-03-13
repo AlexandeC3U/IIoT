@@ -7,6 +7,27 @@
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
+-- SERVICE ROLES
+-- Create application-specific database users
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Data ingestion service user (INSERT-heavy workload)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_ingestion') THEN
+        CREATE ROLE nexus_ingestion WITH LOGIN PASSWORD 'nexus_historian_secret';
+    END IF;
+END $$;
+
+-- Read-only historian query user
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'nexus_historian') THEN
+        CREATE ROLE nexus_historian WITH LOGIN PASSWORD 'nexus_historian_secret';
+    END IF;
+END $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
 -- CORE METRICS TABLE
 -- Main hypertable for all time-series data
 -- ═══════════════════════════════════════════════════════════════════════════════

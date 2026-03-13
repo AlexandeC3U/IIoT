@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -626,4 +627,27 @@ func (p *Publisher) Client() pahomqtt.Client {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.client
+}
+
+// PublishDeviceStatus publishes a device status update to $nexus/status/devices/{deviceId}.
+// This is consumed by gateway-core to update device status in PostgreSQL.
+func (p *Publisher) PublishDeviceStatus(ctx context.Context, deviceID string, status string, lastError string, stats map[string]interface{}) error {
+	payload := map[string]interface{}{
+		"status":    status,
+		"last_seen": time.Now().UTC().Format(time.RFC3339),
+	}
+	if lastError != "" {
+		payload["last_error"] = lastError
+	}
+	if stats != nil {
+		payload["stats"] = stats
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status payload: %w", err)
+	}
+
+	topic := "$nexus/status/devices/" + deviceID
+	return p.publishRaw(ctx, topic, data, 1, true) // QoS 1, retained
 }

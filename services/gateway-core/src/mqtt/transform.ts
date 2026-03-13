@@ -90,6 +90,11 @@ export function deviceToProtocolGateway(device: Device, deviceTags: Tag[]): PGDe
  * Transform a gateway-core DB tag into protocol-gateway format.
  */
 export function tagToProtocolGateway(tag: Tag): PGTag {
+  // For OPC UA tags the node ID may live in the generic `address` column
+  // (e.g. "ns=2;s=Temperature") when `opcNodeId` wasn't explicitly set.
+  const opcNodeId = tag.opcNodeId
+    || (tag.address && /^(ns=|nsu=|i=|s=)/i.test(tag.address) ? tag.address : '');
+
   return {
     id: tag.id,
     name: tag.name,
@@ -109,7 +114,7 @@ export function tagToProtocolGateway(tag: Tag): PGTag {
     byte_order: tag.byteOrder ?? 'big_endian',
     register_type: tag.registerType ?? '',
     register_count: tag.registerCount ?? undefined,
-    opc_node_id: tag.opcNodeId ?? '',
+    opc_node_id: opcNodeId,
     opc_namespace_uri: tag.opcNamespaceUri ?? '',
     s7_address: tag.s7Address ?? '',
     topic_suffix: tag.topicSuffix ?? tag.name,

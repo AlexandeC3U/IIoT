@@ -5,6 +5,41 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
+  name: gateway-core
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: gateway-core
+    app.kubernetes.io/component: api-gateway
+    app.kubernetes.io/part-of: nexus-edge
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gateway-core
+  namespaceSelector:
+    matchNames:
+      - nexus
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      scheme: http
+      honorLabels: true
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+      metricRelabelings:
+        - sourceLabels: []
+          targetLabel: service
+          replacement: gateway-core
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
   name: protocol-gateway
   namespace: nexus
   labels:

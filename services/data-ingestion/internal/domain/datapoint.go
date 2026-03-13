@@ -69,10 +69,10 @@ type DataPoint struct {
 // MQTTPayload represents the JSON structure from Protocol Gateway
 // Uses compact field names to match the gateway's output format
 type MQTTPayload struct {
-	Value           interface{} `json:"v"`              // Compact: "v" for value
-	Quality         string      `json:"q"`              // Compact: "q" for quality (string like "good", "bad")
-	Unit            string      `json:"u,omitempty"`    // Compact: "u" for unit
-	Timestamp       int64       `json:"ts"`             // Compact: "ts" for timestamp (unix milliseconds)
+	Value           interface{} `json:"v"`           // Compact: "v" for value
+	Quality         string      `json:"q"`           // Compact: "q" for quality (string like "good", "bad")
+	Unit            string      `json:"u,omitempty"` // Compact: "u" for unit
+	Timestamp       int64       `json:"ts"`          // Compact: "ts" for timestamp (unix milliseconds)
 	SourceTimestamp int64       `json:"source_ts,omitempty"`
 	DeviceID        string      `json:"device_id,omitempty"`
 	TagID           string      `json:"tag_id,omitempty"`
@@ -236,13 +236,14 @@ func (b *Batch) Age() time.Duration {
 }
 
 // Clear resets the batch for reuse
-func (b *Batch) Clear() {
-	for i := range b.Points {
-		b.Points[i] = nil
-	}
-	b.Points = b.Points[:0]
-	b.CreatedAt = time.Now()
-}
+// Unused, but could be helpful if we want to reuse batches without returning them to the pool.
+// func (b *Batch) Clear() {
+// 	for i := range b.Points {
+// 		b.Points[i] = nil
+// 	}
+// 	b.Points = b.Points[:0]
+// 	b.CreatedAt = time.Now()
+// }
 
 // AcquireDataPoint gets a DataPoint from the pool and initializes it.
 func AcquireDataPoint() *DataPoint {
@@ -268,4 +269,3 @@ func ReleaseDataPoint(dp *DataPoint) {
 	dp.ReceivedAt = time.Time{}
 	dataPointPool.Put(dp)
 }
-

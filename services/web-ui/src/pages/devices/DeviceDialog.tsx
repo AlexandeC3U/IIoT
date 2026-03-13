@@ -1,11 +1,14 @@
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/toaster';
-import { deviceApi, type CreateDeviceInput, type Device } from '@/lib/api';
+import { deviceApi, type CreateDeviceInput, type Device, type Protocol } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation } from '@tanstack/react-query';
-import { X } from 'lucide-react';
-import { useForm } from 'react-hook-form';
+import { Loader2, X } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { PROTOCOL_CONFIG_COMPONENTS, getProtocolDefaults } from './protocols';
 
 interface DeviceDialogProps {
   open: boolean;
@@ -14,48 +17,93 @@ interface DeviceDialogProps {
   onSuccess: () => void;
 }
 
-type FormData = CreateDeviceInput;
+const PROTOCOLS: { value: Protocol; label: string; defaultPort: number }[] = [
+  { value: 'modbus', label: 'Modbus TCP/RTU', defaultPort: 502 },
+  { value: 'opcua', label: 'OPC UA', defaultPort: 4840 },
+  { value: 's7', label: 'Siemens S7', defaultPort: 102 },
+  { value: 'mqtt', label: 'MQTT', defaultPort: 1883 },
+  { value: 'bacnet', label: 'BACnet/IP', defaultPort: 47808 },
+  { value: 'ethernetip', label: 'EtherNet/IP', defaultPort: 44818 },
+];
+
+function buildInitialForm(device: Device | null): CreateDeviceInput {
+  if (device) {
+    return {
+      name: device.name,
+      description: device.description ?? '',
+      protocol: device.protocol,
+      host: device.host,
+      port: device.port,
+      pollIntervalMs: device.pollIntervalMs,
+      location: device.location ?? '',
+      unsPrefix: device.unsPrefix ?? '',
+      enabled: device.enabled,
+      protocolConfig: (device.protocolConfig ?? {}) as Record<string, unknown>,
+    };
+  }
+  return {
+    name: '',
+    description: '',
+    protocol: 'modbus',
+    host: '',
+    port: 502,
+    pollIntervalMs: 1000,
+    location: '',
+    unsPrefix: '',
+    enabled: true,
+    protocolConfig: getProtocolDefaults('modbus'),
+  };
+}
 
 export function DeviceDialog({ open, onOpenChange, device, onSuccess }: DeviceDialogProps) {
   const isEditing = !!device;
+  const [form, setForm] = useState<CreateDeviceInput>(() => buildInitialForm(device));
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const {
-    register,
-    handleSubmit,
-    watch,
-    reset,
-    formState: { errors, isSubmitting },
-  } = useForm<FormData>({
-    defaultValues: device
-      ? {
-          name: device.name,
-          description: device.description ?? '',
-          protocol: device.protocol,
-          host: device.host,
-          port: device.port,
-          pollIntervalMs: device.pollIntervalMs,
-          location: device.location ?? '',
-          enabled: device.enabled,
-        }
-      : {
-          name: '',
-          description: '',
-          protocol: 'modbus',
-          host: '',
-          port: 502,
-          pollIntervalMs: 1000,
-          location: '',
-          enabled: true,
-        },
-  });
+  // Reset form when device changes or dialog opens
+  useEffect(() => {
+    if (open) {
+      setForm(buildInitialForm(device));
+      setErrors({});
+    }
+  }, [open, device]);
 
-  const protocol = watch('protocol');
+  const updateField = useCallback(
+    <K extends keyof CreateDeviceInput>(key: K, value: CreateDeviceInput[K]) => {
+      setForm((prev) => ({ ...prev, [key]: value }));
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    },
+    []
+  );
+
+  // When protocol changes, update port + reset protocolConfig
+  const handleProtocolChange = useCallback((protocol: Protocol) => {
+    const proto = PROTOCOLS.find((p) => p.value === protocol)!;
+    setForm((prev) => ({
+      ...prev,
+      protocol,
+      port: proto.defaultPort,
+      protocolConfig: getProtocolDefaults(protocol),
+    }));
+  }, []);
+
+  const validate = (): boolean => {
+    const errs: Record<string, string> = {};
+    if (!form.name.trim()) errs.name = 'Name is required';
+    if (!form.host.trim()) errs.host = 'Host is required';
+    if (!form.port || form.port < 1 || form.port > 65535) errs.port = 'Valid port required (1-65535)';
+    setErrors(errs);
+    return Object.keys(errs).length === 0;
+  };
 
   const createMutation = useMutation({
     mutationFn: (data: CreateDeviceInput) => deviceApi.create(data),
     onSuccess: () => {
       toast({ title: 'Device created', description: 'Device added successfully' });
-      reset();
       onSuccess();
     },
     onError: (error) => {
@@ -82,27 +130,24 @@ export function DeviceDialog({ open, onOpenChange, device, onSuccess }: DeviceDi
     },
   });
 
-  const onSubmit = handleSubmit((data) => {
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validate()) return;
     if (isEditing) {
-      updateMutation.mutate(data);
+      updateMutation.mutate(form);
     } else {
-      createMutation.mutate(data);
+      createMutation.mutate(form);
     }
-  });
-
-  // Reset form when device changes
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
-      reset();
-    }
-    onOpenChange(open);
   };
 
+  const isSubmitting = createMutation.isPending || updateMutation.isPending;
+  const ProtocolConfigComponent = PROTOCOL_CONFIG_COMPONENTS[form.protocol];
+
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange}>
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-background/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 max-h-[85vh] w-[90vw] max-w-lg translate-x-[-50%] translate-y-[-50%] overflow-y-auto rounded-lg border bg-card p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]">
+        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 max-h-[90vh] w-[90vw] max-w-2xl translate-x-[-50%] translate-y-[-50%] overflow-y-auto rounded-lg border bg-card p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%]">
           <Dialog.Title className="text-lg font-semibold">
             {isEditing ? 'Edit Device' : 'Add Device'}
           </Dialog.Title>
@@ -112,131 +157,147 @@ export function DeviceDialog({ open, onOpenChange, device, onSuccess }: DeviceDi
               : 'Configure a new device to connect to your industrial network.'}
           </Dialog.Description>
 
-          <form onSubmit={onSubmit} className="mt-6 space-y-4">
-            {/* Name */}
-            <div>
-              <label className="text-sm font-medium">Name *</label>
-              <input
-                {...register('name', { required: 'Name is required' })}
-                className={cn(
-                  'w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring',
-                  errors.name && 'border-destructive'
+          <form onSubmit={onSubmit} className="mt-6 space-y-5">
+            {/* ── General ──────────────────────────────────────────── */}
+            <div className="grid grid-cols-2 gap-3">
+              {/* Name */}
+              <div className="col-span-2 sm:col-span-1">
+                <label className="text-sm font-medium">Name *</label>
+                <Input
+                  value={form.name}
+                  onChange={(e) => updateField('name', e.target.value)}
+                  error={!!errors.name}
+                  placeholder="PLC-001"
+                  className="mt-1.5"
+                />
+                {errors.name && <p className="text-xs text-destructive mt-1">{errors.name}</p>}
+              </div>
+
+              {/* Protocol */}
+              <div className="col-span-2 sm:col-span-1">
+                <label className="text-sm font-medium">Protocol *</label>
+                <select
+                  value={form.protocol}
+                  onChange={(e) => handleProtocolChange(e.target.value as Protocol)}
+                  disabled={isEditing}
+                  className="w-full mt-1.5 h-9 px-3 text-sm bg-transparent border border-input rounded-md focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+                >
+                  {PROTOCOLS.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+                {isEditing && (
+                  <p className="text-xs text-muted-foreground mt-1">Protocol cannot be changed</p>
                 )}
-                placeholder="PLC-001"
-              />
-              {errors.name && (
-                <p className="text-xs text-destructive mt-1">{errors.name.message}</p>
-              )}
+              </div>
             </div>
 
-            {/* Protocol */}
-            <div>
-              <label className="text-sm font-medium">Protocol *</label>
-              <select
-                {...register('protocol', { required: true })}
-                disabled={isEditing}
-                className="w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-              >
-                <option value="modbus">Modbus TCP/RTU</option>
-                <option value="opcua">OPC UA</option>
-                <option value="s7">Siemens S7</option>
-              </select>
-              {isEditing && (
-                <p className="text-xs text-muted-foreground mt-1">Protocol cannot be changed</p>
-              )}
-            </div>
-
-            {/* Host & Port */}
+            {/* ── Connection ───────────────────────────────────────── */}
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
                 <label className="text-sm font-medium">Host *</label>
-                <input
-                  {...register('host', { required: 'Host is required' })}
-                  className={cn(
-                    'w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring font-mono',
-                    errors.host && 'border-destructive'
-                  )}
+                <Input
+                  value={form.host}
+                  onChange={(e) => updateField('host', e.target.value)}
+                  error={!!errors.host}
                   placeholder="192.168.1.10"
+                  className="mt-1.5 font-mono"
                 />
+                {errors.host && <p className="text-xs text-destructive mt-1">{errors.host}</p>}
               </div>
               <div>
                 <label className="text-sm font-medium">Port *</label>
-                <input
+                <Input
                   type="number"
-                  {...register('port', {
-                    required: 'Port is required',
-                    valueAsNumber: true,
-                    min: { value: 1, message: 'Min 1' },
-                    max: { value: 65535, message: 'Max 65535' },
-                  })}
-                  className={cn(
-                    'w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring font-mono',
-                    errors.port && 'border-destructive'
-                  )}
-                  placeholder={protocol === 'modbus' ? '502' : protocol === 'opcua' ? '4840' : '102'}
+                  value={form.port}
+                  onChange={(e) => updateField('port', parseInt(e.target.value) || 0)}
+                  error={!!errors.port}
+                  className="mt-1.5 font-mono"
+                />
+                {errors.port && <p className="text-xs text-destructive mt-1">{errors.port}</p>}
+              </div>
+            </div>
+
+            {/* ── Protocol-specific configuration ──────────────────── */}
+            <Separator />
+            <ProtocolConfigComponent
+              config={(form.protocolConfig ?? {}) as Record<string, unknown>}
+              onChange={(config) => updateField('protocolConfig', config)}
+              disabled={isSubmitting}
+            />
+            <Separator />
+
+            {/* ── Polling & UNS ─────────────────────────────────────── */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium">Poll Interval (ms)</label>
+                <Input
+                  type="number"
+                  value={form.pollIntervalMs ?? 1000}
+                  onChange={(e) => updateField('pollIntervalMs', parseInt(e.target.value) || 1000)}
+                  min={50}
+                  max={3600000}
+                  className="mt-1.5 font-mono"
+                />
+                <p className="text-xs text-muted-foreground mt-1">50ms - 1hr</p>
+              </div>
+              <div>
+                <label className="text-sm font-medium">UNS Prefix</label>
+                <Input
+                  value={form.unsPrefix ?? ''}
+                  onChange={(e) => updateField('unsPrefix', e.target.value)}
+                  placeholder="enterprise/site/area/line"
+                  className="mt-1.5 font-mono"
                 />
               </div>
             </div>
 
-            {/* Poll Interval */}
-            <div>
-              <label className="text-sm font-medium">Poll Interval (ms)</label>
-              <input
-                type="number"
-                {...register('pollIntervalMs', {
-                  valueAsNumber: true,
-                  min: { value: 50, message: 'Min 50ms' },
-                  max: { value: 3600000, message: 'Max 1 hour' },
-                })}
-                className="w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring font-mono"
-                placeholder="1000"
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                How often to poll this device for data (50ms - 1hr)
-              </p>
-            </div>
-
-            {/* Description */}
-            <div>
-              <label className="text-sm font-medium">Description</label>
-              <textarea
-                {...register('description')}
-                rows={2}
-                className="w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring resize-none"
-                placeholder="Optional description..."
-              />
-            </div>
-
-            {/* Location */}
-            <div>
-              <label className="text-sm font-medium">Location</label>
-              <input
-                {...register('location')}
-                className="w-full mt-1.5 px-3 py-2 text-sm bg-background border rounded-md focus:outline-none focus:ring-2 focus:ring-ring"
-                placeholder="Building A - Line 1"
-              />
+            {/* ── Optional fields ───────────────────────────────────── */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium">Location</label>
+                <Input
+                  value={form.location ?? ''}
+                  onChange={(e) => updateField('location', e.target.value)}
+                  placeholder="Building A - Line 1"
+                  className="mt-1.5"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Description</label>
+                <Input
+                  value={form.description ?? ''}
+                  onChange={(e) => updateField('description', e.target.value)}
+                  placeholder="Optional description"
+                  className="mt-1.5"
+                />
+              </div>
             </div>
 
             {/* Enabled */}
             <div className="flex items-center gap-3">
               <input
                 type="checkbox"
-                id="enabled"
-                {...register('enabled')}
-                className="h-4 w-4 rounded border-input"
+                id="device-enabled"
+                checked={form.enabled ?? true}
+                onChange={(e) => updateField('enabled', e.target.checked)}
+                className={cn('h-4 w-4 rounded border-input accent-primary')}
               />
-              <label htmlFor="enabled" className="text-sm font-medium">
+              <label htmlFor="device-enabled" className="text-sm font-medium">
                 Enabled
               </label>
             </div>
 
-            {/* Actions */}
-            <div className="flex justify-end gap-3 pt-4">
-              <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+            {/* ── Actions ────────────────────────────────────────── */}
+            <div className="flex justify-end gap-3 pt-4 border-t border-border/50">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Cancel
               </Button>
               <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting ? 'Saving...' : isEditing ? 'Save Changes' : 'Add Device'}
+                {isSubmitting && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+                {isEditing ? 'Save Changes' : 'Add Device'}
               </Button>
             </div>
           </form>
@@ -254,4 +315,3 @@ export function DeviceDialog({ open, onOpenChange, device, onSuccess }: DeviceDi
     </Dialog.Root>
   );
 }
-

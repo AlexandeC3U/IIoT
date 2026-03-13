@@ -1,0 +1,37 @@
+﻿172.28.0.1 - - [13/Mar/2026:15:22:20 +0000] "GET /health/ready HTTP/1.1" 502 559 "http://localhost/dashboard" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0" "-"
+172.28.0.1 - - [13/Mar/2026:15:22:35 +0000] "GET /health/ready HTTP/1.1" 502 559 "http://localhost/dashboard" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0" "-"
+172.28.0.1 - - [13/Mar/2026:15:22:36 +0000] "GET /health/ready HTTP/1.1" 502 559 "http://localhost/dashboard" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0" "-"
+172.28.0.1 - - [13/Mar/2026:15:22:38 +0000] "GET /api/devices?limit=100 HTTP/1.1" 502 559 "http://localhost/devices" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0" "-"
+172.28.0.1 - - [13/Mar/2026:15:22:39 +0000] "GET /api/devices?limit=100 HTTP/1.1" 502 559 "http://localhost/devices" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0" "-"
+docker : 2026/03/13 15:22:20 [error] 26#26: *27 connect() failed (111: 
+Connection refused) while connecting to upstream, client: 172.28.0.1, server: 
+localhost, request: "GET /health/ready HTTP/1.1", upstream: 
+"http://172.28.0.9:3001/health/ready", host: "localhost", referrer: 
+"http://localhost/dashboard"
+At line:1 char:1
++ docker logs nexus-nginx --tail 10 2>&1 | Out-File -FilePath "C:\Users ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (2026/03/13 15:2...host/dashboard" 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+2026/03/13 15:22:35 [error] 26#26: *27 connect() failed (111: Connection 
+refused) while connecting to upstream, client: 172.28.0.1, server: localhost, 
+request: "GET /health/ready HTTP/1.1", upstream: 
+"http://172.28.0.9:3001/health/ready", host: "localhost", referrer: 
+"http://localhost/dashboard"
+2026/03/13 15:22:36 [error] 26#26: *27 connect() failed (111: Connection 
+refused) while connecting to upstream, client: 172.28.0.1, server: localhost, 
+request: "GET /health/ready HTTP/1.1", upstream: 
+"http://172.28.0.9:3001/health/ready", host: "localhost", referrer: 
+"http://localhost/dashboard"
+2026/03/13 15:22:38 [error] 26#26: *27 connect() failed (111: Connection 
+refused) while connecting to upstream, client: 172.28.0.1, server: localhost, 
+request: "GET /api/devices?limit=100 HTTP/1.1", upstream: 
+"http://172.28.0.9:3001/api/devices?limit=100", host: "localhost", referrer: 
+"http://localhost/devices"
+2026/03/13 15:22:39 [error] 26#26: *27 connect() failed (111: Connection 
+refused) while connecting to upstream, client: 172.28.0.1, server: localhost, 
+request: "GET /api/devices?limit=100 HTTP/1.1", upstream: 
+"http://172.28.0.9:3001/api/devices?limit=100", host: "localhost", referrer: 
+"http://localhost/devices"

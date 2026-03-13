@@ -1,0 +1,14 @@
+# PostgreSQL (Config DB) - Kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nexus
+
+resources:
+  - serviceaccount.yaml
+  - statefulset.yaml
+  - service.yaml
+
+commonLabels:
+  app.kubernetes.io/name: postgres
+  app.kubernetes.io/component: config-database

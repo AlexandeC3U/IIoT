@@ -20,9 +20,10 @@ mqtt:
 
   # Shared subscriptions for load balancing across multiple instances
   # The $share/group/ prefix ensures each message is delivered to only ONE instance
+  # Uses wildcard '#' to catch all user-defined UNS prefixes (e.g. site/area/line/tag)
+  # Note: MQTT spec guarantees '#' does NOT match $-prefixed system topics ($nexus/...)
   topics:
-    - "$share/ingestion/dev/#"
-    - "$share/ingestion/uns/#"
+    - "$share/ingestion/#"
 
   qos: 1                    # At-least-once delivery
   keep_alive: 30s

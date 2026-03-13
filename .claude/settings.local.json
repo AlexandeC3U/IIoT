@@ -6,7 +6,16 @@
       "Bash(pnpm add:*)",
       "Bash(cat c:/Users/ceulea/Projects/Connector/node_modules/.pnpm/@fastify+websocket@*/node_modules/@fastify/websocket/types/index.d.ts)",
       "Bash(ls c:/Users/ceulea/Projects/Connector/node_modules/.pnpm/@types+ws*/node_modules/@types/ws/)",
-      "Bash(pnpm build:*)"
+      "Bash(pnpm build:*)",
+      "Bash(npx vite:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker volume:*)",
+      "Bash(echo $AUTH_ENABLED)",
+      "Bash(curl -s http://localhost:3001/health/ready)",
+      "Bash(curl -s http://localhost:8080/)",
+      "Bash(curl -s http://localhost:8080/api/devices)",
+      "Bash(curl -s http://localhost:8080/health/ready)",
+      "Bash(go build:*)"
     ]
   }
 }

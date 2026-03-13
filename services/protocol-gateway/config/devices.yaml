@@ -1,22 +1,22 @@
 version: "1.0"
 devices:
-    - id: device-001
-      name: Demo
+    - id: 9142d4e8-ba92-4c4d-8c59-c20c3eec3144
+      name: PLC-001
       protocol: opcua
       enabled: true
-      uns_prefix: plant1/area1/line2
+      uns_prefix: ghent/prd/line1
       poll_interval: 10s
       connection:
         host: nexus-opcua-sim
         port: 4840
-        timeout: 5s
-        retry_count: 3
-        retry_delay: 100ms
-        slave_id: 1
+        timeout: 10s
+        retry_count: 0
+        retry_delay: 0s
+        slave_id: 0
         opc_endpoint_url: opc.tcp://nexus-opcua-sim:4840
         opc_security_policy: None
-        opc_security_mode: ""
-        opc_auth_mode: ""
+        opc_security_mode: None
+        opc_auth_mode: anonymous
         opc_username: ""
         opc_password: ""
         opc_cert_file: ""
@@ -32,25 +32,23 @@ devices:
         s7_rack: 0
         s7_slot: 0
       tags:
-        - id: tag-1771836635977
-          name: Switch
-          data_type: bool
+        - id: 53047175-540c-4ce6-838c-d14cb14abac2
+          name: temp
+          data_type: float32
           scale_factor: 1
-          topic_suffix: Switch
-          enabled: true
-          access_mode: readwrite
-          register_type: holding_register
-          byte_order: big_endian
-          register_count: 1
-          opc_node_id: ns=2;s=Demo.Switch
-        - id: tag-1771861039471
-          name: Temperature
-          data_type: float64
-          scale_factor: 1
-          topic_suffix: Temperature
+          topic_suffix: temp
+          deadband_type: none
           enabled: true
           access_mode: read
-          register_type: holding_register
           byte_order: big_endian
-          register_count: 1
           opc_node_id: ns=2;s=Demo.Temperature
+        - id: a74502d5-a180-4cba-ab1c-9442171dd5fa
+          name: switch
+          data_type: bool
+          scale_factor: 1
+          topic_suffix: switch
+          deadband_type: none
+          enabled: true
+          access_mode: readwrite
+          byte_order: big_endian
+          opc_node_id: ns=2;s=Demo.Switch

@@ -421,3 +421,7 @@ func (w *Writer) Close() {
 	w.logger.Info().Msg("TimescaleDB writer closed")
 }
 
+// Pool exposes the underlying connection pool for read-only query handlers.
+func (w *Writer) Pool() *pgxpool.Pool {
+	return w.pool
+}

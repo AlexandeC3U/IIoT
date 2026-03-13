@@ -5,6 +5,9 @@ import { mqttService } from './client.js';
 // Topic pattern: $nexus/status/devices/{deviceId}
 const STATUS_TOPIC = '$nexus/status/devices/+';
 
+// Topic for config sync requests from protocol-gateway
+const SYNC_REQUEST_TOPIC = '$nexus/config/sync/request';
+
 interface DeviceStatusPayload {
   status: 'online' | 'offline' | 'error' | 'unknown' | 'connecting';
   last_seen?: string;
@@ -40,6 +43,40 @@ export async function startStatusSubscriber(): Promise<void> {
 
   await mqttService.subscribe(STATUS_TOPIC);
   logger.info({ topic: STATUS_TOPIC }, 'Status subscriber started');
+}
+
+/**
+ * Subscribe to config sync requests from protocol-gateway.
+ * When protocol-gateway starts (or reconnects), it publishes a sync request.
+ * We respond with a bulk publish of all device configs so it can reconcile.
+ */
+export async function startConfigSyncSubscriber(): Promise<void> {
+  mqttService.onMessage((topic, _payload) => {
+    if (topic !== SYNC_REQUEST_TOPIC) return;
+
+    logger.info('Received config sync request from protocol-gateway');
+    handleSyncRequest().catch((error) => {
+      logger.error({ error }, 'Failed to handle config sync request');
+    });
+  });
+
+  await mqttService.subscribe(SYNC_REQUEST_TOPIC);
+  logger.info({ topic: SYNC_REQUEST_TOPIC }, 'Config sync subscriber started');
+}
+
+async function handleSyncRequest(): Promise<void> {
+  // Fetch all enabled devices with their tags
+  const { data: allDevices } = await deviceService.list({ limit: 1000, offset: 0 });
+
+  const devicesWithTags = await Promise.all(
+    allDevices.map(async (device) => {
+      const tags = await deviceService.getDeviceTags(device.id);
+      return { device, tags };
+    })
+  );
+
+  await mqttService.notifyDevicesBulk(devicesWithTags);
+  logger.info({ count: devicesWithTags.length }, 'Config sync response sent');
 }
 
 async function handleStatusUpdate(deviceId: string, data: DeviceStatusPayload): Promise<void> {

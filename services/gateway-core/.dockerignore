@@ -1,0 +1,12 @@
+node_modules
+dist
+.turbo
+*.md
+.env
+.env.*
+.git
+.gitignore
+scripts
+drizzle
+vitest.config.*
+eslint*

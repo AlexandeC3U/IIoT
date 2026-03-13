@@ -13,6 +13,7 @@ import (
 	"github.com/nexus-edge/protocol-gateway/internal/adapter/config"
 	"github.com/nexus-edge/protocol-gateway/internal/adapter/mqtt"
 	"github.com/nexus-edge/protocol-gateway/internal/domain"
+	"github.com/nexus-edge/protocol-gateway/internal/service"
 	"github.com/rs/zerolog"
 )
 
@@ -408,9 +409,16 @@ func (dm *DeviceManager) saveDevicesUnlocked() error {
 	return config.SaveDevices(dm.devicesPath, devices)
 }
 
+// DeviceProvider is the read interface used by API handlers and browse endpoints.
+// Satisfied by both DeviceManager (YAML-based) and MQTTDeviceManager (in-memory).
+type DeviceProvider interface {
+	GetDevice(id string) (*domain.Device, bool)
+	GetDevices() []*domain.Device
+}
+
 // APIHandler provides HTTP handlers for the web UI.
 type APIHandler struct {
-	deviceManager    *DeviceManager
+	deviceManager    DeviceProvider
 	logger           zerolog.Logger
 	topicTracker     TopicTracker
 	subscriptions    SubscriptionProvider
@@ -419,7 +427,7 @@ type APIHandler struct {
 }
 
 // NewAPIHandler creates a new API handler.
-func NewAPIHandler(deviceManager *DeviceManager, logger zerolog.Logger) *APIHandler {
+func NewAPIHandler(deviceManager DeviceProvider, logger zerolog.Logger) *APIHandler {
 	return &APIHandler{
 		deviceManager: deviceManager,
 		logger:        logger,
@@ -510,103 +518,40 @@ func (h *APIHandler) GetDeviceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// CreateDeviceHandler creates a new device.
-func (h *APIHandler) CreateDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var device domain.Device
-	if err := json.NewDecoder(r.Body).Decode(&device); err != nil {
-		h.logger.Error().Err(err).Msg("Failed to decode device")
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.deviceManager.AddDevice(&device); err != nil {
-		h.logger.Error().Err(err).Str("device", device.ID).Msg("Failed to add device")
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Device created"})
-}
-
-// UpdateDeviceHandler updates an existing device.
-func (h *APIHandler) UpdateDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var device domain.Device
-	if err := json.NewDecoder(r.Body).Decode(&device); err != nil {
-		h.logger.Error().Err(err).Msg("Failed to decode device")
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.deviceManager.UpdateDevice(&device); err != nil {
-		h.logger.Error().Err(err).Str("device", device.ID).Msg("Failed to update device")
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Device updated"})
-}
-
-// DeleteDeviceHandler deletes a device.
-func (h *APIHandler) DeleteDeviceHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		http.Error(w, "Device ID is required", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.deviceManager.DeleteDevice(id); err != nil {
-		h.logger.Error().Err(err).Str("device", id).Msg("Failed to delete device")
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Device deleted"})
-}
+// NOTE: CreateDeviceHandler, UpdateDeviceHandler, DeleteDeviceHandler removed.
+// Device config is now managed by gateway-core and synced via MQTT config subscriber.
+// See internal/service/config_subscriber.go.
 
 // TestConnectionHandler tests a device connection without saving.
+// Accepts the gateway-core wire format (string durations) and converts to domain types.
 func (h *APIHandler) TestConnectionHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var device domain.Device
-	if err := json.NewDecoder(r.Body).Decode(&device); err != nil {
+	var wd service.WireDevice
+	if err := json.NewDecoder(r.Body).Decode(&wd); err != nil {
 		h.logger.Error().Err(err).Msg("Failed to decode device")
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Basic validation
-	if err := device.Validate(); err != nil {
-		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
-		return
+	device := service.WireDeviceToDomain(wd)
+
+	// Basic validation — skip for test-connection if no tags yet
+	if len(device.Tags) > 0 {
+		if err := device.Validate(); err != nil {
+			http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// If no connection tester is wired in, fall back to validation-only
 	if h.connectionTester == nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "success",
+			"success": true,
 			"message": "Connection test passed (validation only — no protocol pool available)",
 		})
 		return
@@ -628,7 +573,7 @@ func (h *APIHandler) TestConnectionHandler(w http.ResponseWriter, r *http.Reques
 
 	tag := device.Tags[0]
 	start := time.Now()
-	_, err := h.connectionTester.ReadTag(ctx, &device, &tag)
+	_, err := h.connectionTester.ReadTag(ctx, device, &tag)
 	elapsed := time.Since(start)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -643,18 +588,16 @@ func (h *APIHandler) TestConnectionHandler(w http.ResponseWriter, r *http.Reques
 
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":   "error",
-			"message":  fmt.Sprintf("Connection test failed: %v", err),
-			"elapsed":  elapsed.String(),
-			"protocol": device.Protocol,
+			"success":   false,
+			"message":   fmt.Sprintf("Connection test failed: %v", err),
+			"latencyMs": elapsed.Milliseconds(),
 		})
 		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   "success",
-		"message":  "Connection test passed",
-		"elapsed":  elapsed.String(),
-		"protocol": device.Protocol,
+		"success":   true,
+		"message":   "Connection test passed",
+		"latencyMs": elapsed.Milliseconds(),
 	})
 }

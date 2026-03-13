@@ -13,11 +13,15 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@8.12.0 --activate
 
-# Copy source code (including package.json)
-COPY . .
+# Copy dependency files first (layer caching — only reinstalls when deps change)
+COPY package.json ./
 
 # Install ALL dependencies (including devDependencies for build)
 RUN pnpm install --no-frozen-lockfile
+
+# Copy source code
+COPY tsconfig.json tsup.config.* ./
+COPY src ./src
 
 # Build TypeScript
 RUN pnpm build
@@ -58,4 +62,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 # Start the service
 CMD ["node", "dist/index.js"]
-

@@ -15,10 +15,11 @@ import { registerMetrics } from './lib/metrics.js';
 import { registerAudit } from './middleware/audit.js';
 import { registerAuth } from './middleware/auth.js';
 import { mqttService } from './mqtt/client.js';
-import { startStatusSubscriber } from './mqtt/subscriber.js';
+import { startConfigSyncSubscriber, startStatusSubscriber } from './mqtt/subscriber.js';
 import {
   deviceRoutes,
   healthRoutes,
+  historianRoutes,
   opcuaRoutes,
   systemRoutes,
   tagRoutes,
@@ -160,6 +161,7 @@ await app.register(deviceRoutes, { prefix: '/api/devices' });
 await app.register(tagRoutes, { prefix: '/api/tags' });
 await app.register(opcuaRoutes, { prefix: '/api/opcua' });
 await app.register(systemRoutes, { prefix: '/api/system' });
+await app.register(historianRoutes, { prefix: '/api/historian' });
 
 // WebSocket bridge (MQTT → WS for browser real-time updates)
 await registerWebSocketBridge(app);
@@ -217,8 +219,9 @@ async function start() {
     mqttService
       .connect()
       .then(async () => {
-        // Once connected, start the status subscriber
+        // Once connected, start subscribers
         await startStatusSubscriber();
+        await startConfigSyncSubscriber();
       })
       .catch((error) => {
         logger.warn({ error }, 'Initial MQTT connection failed, will retry...');

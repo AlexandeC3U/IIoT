@@ -23,6 +23,11 @@ data:
   LOG_LEVEL: "info"
   LOG_FORMAT: "json"
   
+  # Service Discovery
+  PROTOCOL_GATEWAY_URL: "http://protocol-gateway:8080"
+  DATA_INGESTION_URL: "http://data-ingestion:8080"
+  MQTT_BROKER_MQTT: "mqtt://emqx:1883"
+
   # Health Check
   HEALTH_CHECK_INTERVAL: "30s"
 
@@ -111,4 +116,25 @@ data:
       flush_interval: 250ms
       writer_count: 8
       use_copy_protocol: true
+
+---
+# Gateway Core specific config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-core-config
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: gateway-core
+    app.kubernetes.io/part-of: nexus-edge
+data:
+  # CORS (comma-separated origins, or "*" for dev)
+  CORS_ORIGIN: "*"
+  # Auth (disable for dev, enable in prod overlay)
+  AUTH_ENABLED: "false"
+  OIDC_ISSUER_URL: ""
+  OIDC_AUDIENCE: ""
+  # Features
+  AUDIT_ENABLED: "true"
+  RATE_LIMIT_ENABLED: "false"
 

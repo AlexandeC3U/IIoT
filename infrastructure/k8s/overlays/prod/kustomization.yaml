@@ -8,8 +8,10 @@ namespace: nexus
 
 resources:
   - ../../base
+  - ../../services/postgres
   - ../../services/emqx
   - ../../services/timescaledb
+  - ../../services/gateway-core
   - ../../services/protocol-gateway
   - ../../services/data-ingestion
 
@@ -98,6 +100,17 @@ patches:
     target:
       kind: StatefulSet
       name: emqx
+
+  # Production: enable auth and rate limiting on gateway-core
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: gateway-core-config
+      data:
+        AUTH_ENABLED: "true"
+        RATE_LIMIT_ENABLED: "true"
+        CORS_ORIGIN: ""
 
 commonLabels:
   app.kubernetes.io/environment: production

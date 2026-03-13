@@ -8,8 +8,10 @@ namespace: nexus
 
 resources:
   - ../../base
+  - ../../services/postgres
   - ../../services/emqx
   - ../../services/timescaledb
+  - ../../services/gateway-core
   - ../../services/protocol-gateway
   - ../../services/data-ingestion
 
@@ -85,6 +87,14 @@ patches:
     target:
       kind: StatefulSet
       name: timescaledb
+
+  - patch: |-
+      - op: replace
+        path: /spec/volumeClaimTemplates/0/spec/resources/requests/storage
+        value: "1Gi"
+    target:
+      kind: StatefulSet
+      name: postgres
   
   - patch: |-
       - op: replace
